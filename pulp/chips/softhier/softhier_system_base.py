@@ -29,6 +29,7 @@ from pulp.chips.softhier.common.softhier_ctrl import SoftHierCtrl
 from pulp.chips.softhier.common.error_detector import ErrorDetector
 from pulp.chips.softhier.softhier_arch_base import TOPOLOGIES, get_arch_overrides
 from pulp.floonoc_flex.floonoc_flex import FlooNocFlex
+import memory.dramsys
 
 
 def _ni_node_name(arch, cluster_id):
@@ -50,6 +51,10 @@ def _ni_node_name(arch, cluster_id):
         x = cluster_id % arch.num_cluster_x
         y = cluster_id // arch.num_cluster_x
         return f"cluster_{x}_{y}_ni"
+    if getattr(arch, 'dram_type', None) is not None:
+            x = cluster_id % arch.num_cluster_x
+            y = cluster_id // arch.num_cluster_x
+            return f"hbm_chan_{x}_{y}_ni"
     return f"cluster_{cluster_id}_ni"
 
 
@@ -136,6 +141,13 @@ class SoftHierSystem(gvsoc.systree.Component):
         softhier_ctrl = SoftHierCtrl(self, 'softhier_ctrl', num_cluster=arch.num_cluster,
                                       num_core_per_cluster=arch.num_core_per_cluster)
 
+        if getattr(arch, 'num_cluster_x', None) is not None:
+            hbm_chan_list = []
+            for cluster_id in range(arch.num_cluster):
+                hbm_chan = memory.dramsys.Dramsys(self, f'hbm_chan_{chan_id}', dram_type='hbm4-emu-example.json')
+                hbm_chan_list.append(hbm_chan)
+                    
+
         # --- FlooNoC Flex Initialization & Topology Building ---
         # floogen.yml/routing.yml/link_latencies.yml are generated here from
         # the actual arch (including --config-opt overrides) into the working
@@ -207,6 +219,15 @@ class SoftHierSystem(gvsoc.systree.Component):
                 'remove_offset': wide_base
             }
             noc.o_WIDE_BIND(cluster_list[cluster_id].i_WIDE_INPUT(), ni_node_id)
+
+        if getattr(arch, 'num_cluster_x', None) is not None:
+            for chan_id in range(arch.num_cluster):
+                    ni_node_id = noc.id_map[_ni_node_name(arch, chan_id)]
+                    noc.o_NARROW_MAP(hbm_chan_list[chan_id].i_INPUT(),
+                                     base=arch.hbm_start_base + chan_id * arch.hbm_node_addr_space,
+                                     size=arch.hbm_node_addr_space,
+                                     node_id=ni_node_id,
+                                     rm_base=False)
 
     def configure(self):
         # With gvrun the binary is provided through a parameter (set either from the

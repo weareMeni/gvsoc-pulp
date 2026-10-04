@@ -399,8 +399,17 @@ def generate_mesh2d(arch, out_dir, topology_name):
     def ep_name(x, y):
         return f"cluster_{x}_{y}"
 
+    def dram_name(x,y):
+        return f"dram_chan_{x}_{y}"
+
     router_names = [r_name(x, y) for y in range(dim_y) for x in range(dim_x)]
-    ni_endpoint_names = [ep_name(x, y) for y in range(dim_y) for x in range(dim_x)]
+    
+    ni_endpoint_names = []
+    for x in range(dim_x):
+        for y in range(dim_y):
+            ni_endpoint_names.append(ep_name(x, y))
+            ni_endpoint_names.append(dram_name(x,y))
+    
     ni_names = [ni_graph_name(name) for name in ni_endpoint_names]
 
     # No "degree" set (see generate_hier_ring): edge/corner routers have

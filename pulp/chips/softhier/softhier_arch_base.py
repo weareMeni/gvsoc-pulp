@@ -76,6 +76,10 @@ class SoftHierArchBase:
         self.spatz_num_lane          = 32
         self.spatz_lane_width        = 4
 
+        #HBM
+        self.hbm_start_base          = 0xc0000000
+        self.hbm_node_addr_space     = 0x04000000
+
         #System
         self.soc_register_base       = 0x70000000
         self.soc_register_size       = 0x00010000
