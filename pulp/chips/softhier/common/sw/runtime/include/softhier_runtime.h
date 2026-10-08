@@ -91,8 +91,7 @@ void flex_global_barrier_polling() {
       flex_reset_barrier(barrier);
       flex_amo_fetch_add(barrier_iter);
     } else {
-      while ((*barrier_iter) == prev_barrier_iteration)
-        ;
+      while ((*barrier_iter) == prev_barrier_iteration);
     }
   }
 

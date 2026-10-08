@@ -8,9 +8,12 @@ int main()
     if(flex_get_cluster_id() == 0 && flex_is_first_core()){
         printf("[SoftHier NoC Topology]  %s\n", ARCH_TOPOLOGY);
     }
+    if(flex_get_cluster_id() == 0) printf("0\n");
     flex_global_barrier_polling();
+    if(flex_get_cluster_id() == 0) printf("1\n");
     for(int i=0; i < 10; i++){
         flex_global_barrier_polling();
+        if(flex_get_cluster_id() == 0) printf("2");
         if(flex_get_cluster_id() == 0 && flex_is_first_core()){
             printf("[Global Sync] iter %d\n", i);
         }
@@ -38,5 +41,7 @@ int main()
     }
     flex_global_barrier_polling();
     flex_eoc_all(0);
+
+    //printf("Hello World, %i\n", flex_get_cluster_id());
     return 0;
 }

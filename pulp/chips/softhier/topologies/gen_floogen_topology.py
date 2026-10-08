@@ -442,7 +442,9 @@ def generate_mesh2d(arch, out_dir, topology_name):
     for y in range(dim_y):
         for x in range(dim_x):
             links.append((ni_graph_name(ep_name(x, y)), r_name(x, y), arch.link_latency))
+            links.append((ni_graph_name(dram_name(x, y)), r_name(x, y), arch.link_latency))
             connections_yaml.append({"src": ep_name(x, y), "dst": r_name(x, y)})
+            connections_yaml.append({"src": dram_name(x, y), "dst": r_name(x, y)})
 
     floogen_doc = {
         "name": topology_name,

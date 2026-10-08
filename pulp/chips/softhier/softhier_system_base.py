@@ -143,11 +143,10 @@ class SoftHierSystem(gvsoc.systree.Component):
 
         if getattr(arch, 'num_cluster_x', None) is not None:
             hbm_chan_list = []
-            for cluster_id in range(arch.num_cluster):
+            for chan_id in range(arch.num_cluster):
                 hbm_chan = memory.dramsys.Dramsys(self, f'hbm_chan_{chan_id}', dram_type='hbm4-emu-example.json')
                 hbm_chan_list.append(hbm_chan)
                     
-
         # --- FlooNoC Flex Initialization & Topology Building ---
         # floogen.yml/routing.yml/link_latencies.yml are generated here from
         # the actual arch (including --config-opt overrides) into the working
