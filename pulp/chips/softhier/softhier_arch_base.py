@@ -61,7 +61,7 @@ class SoftHierArchBase:
         self.cluster_tcdm_remote     = 0x30000000
 
         self.cluster_stack_base      = 0x10000000
-        self.cluster_stack_size      = 0x00020000
+        self.cluster_stack_size      = 0x01000000
 
         self.cluster_zomem_base      = 0x18000000
         self.cluster_zomem_size      = 0x00020000
@@ -70,15 +70,27 @@ class SoftHierArchBase:
         self.cluster_reg_size        = 0x00000200
 
         self.instruction_mem_base    = 0x80000000
-        self.instruction_mem_size    = 0x00010000
+        self.instruction_mem_size    = 0x10000000
 
         #Spatz Vector Unit
         self.spatz_num_lane          = 32
         self.spatz_lane_width        = 4
 
+        #RedMule
+        self.redmule_ce_height      = 32
+        self.redmule_ce_width       = 32
+        self.redmule_ce_pipe        = 3
+        self.redmule_elem_size      = 2
+        self.redmule_reg_base        = 0x00100000
+        self.redmule_reg_size        = 0x00000200
+
         #HBM
-        self.hbm_start_base          = 0xa0000000
+        self.hbm_start_base          = 0xc0000000
         self.hbm_node_addr_space     = 0x04000000
+
+        #ITC
+        self.itc_reg_base            = 0x00100200
+        self.itc_reg_size            = 0x00000200
 
         #System
         self.soc_register_base       = 0x70000000

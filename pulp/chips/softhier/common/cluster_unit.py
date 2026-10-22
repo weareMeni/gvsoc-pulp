@@ -29,6 +29,8 @@ import math
 from pulp.snitch.sequencer import Sequencer
 import utils.loader.loader
 from pulp.chips.softhier.common.cluster_csr import ClusterCSR
+from pulp.light_redmule.light_redmule import LightRedmule
+from pulp.itc.itc_v1 import Itc_v1
 
 
 GAPY_TARGET = True
@@ -62,9 +64,14 @@ class ClusterArch:
         inst_base,          inst_size,
         tcdm_base,          tcdm_size,
         stack_base,         stack_size,
+        hbm_start_base,     hbm_node_addr_space,
         zomem_base,         zomem_size,
         reg_base,           reg_size,
         idma_outstand_txn,  idma_outstand_burst,
+        redmule_ce_height,  redmule_ce_width,
+        redmule_ce_pipe,    redmule_elem_size,
+        redmule_reg_base,   redmule_reg_size,
+        itc_reg_base,       itc_reg_size,
         auto_fetch=False):
 
         self.num_core               = num_core
@@ -79,15 +86,24 @@ class ClusterArch:
         self.tcdm_size              = tcdm_size
         self.stack_base             = stack_base
         self.stack_size             = stack_size
+        self.hbm_start_base         = hbm_start_base
+        self.hbm_node_addr_space    = hbm_node_addr_space
         self.zomem_base             = zomem_base
         self.zomem_size             = zomem_size
         self.reg_base               = reg_base
         self.reg_size               = reg_size
         self.idma_outstand_txn      = idma_outstand_txn
         self.idma_outstand_burst    = idma_outstand_burst
+        self.redmule_ce_height      = redmule_ce_height
+        self.redmule_ce_width       = redmule_ce_width
+        self.redmule_ce_pipe        = redmule_ce_pipe
+        self.redmule_elem_size      = redmule_elem_size
+        self.redmule_reg_base       = redmule_reg_base
+        self.redmule_reg_size       = redmule_reg_size
+        self.itc_reg_base           = itc_reg_base
+        self.itc_reg_size           = itc_reg_size
         self.auto_fetch             = auto_fetch
-
-
+        
 class ClusterTcdm(gvsoc.systree.Component):
 
     def __init__(self, parent, name, arch):
@@ -103,8 +119,7 @@ class ClusterTcdm(gvsoc.systree.Component):
         interleaver = L1_interleaver(self, 'interleaver', nb_slaves=nb_banks,
             nb_masters=nb_masters, interleaving_bits=int(math.log2(arch.tcdm_bank_width)))
 
-        dma_interleaver = DmaInterleaver(self, 'dma_interleaver', 2,
-            nb_banks, arch.tcdm_bank_width)
+        dma_interleaver = DmaInterleaver(self, 'dma_interleaver', 2, nb_banks, arch.tcdm_bank_width)
 
         for i in range(0, nb_banks):
             self.bind(interleaver, 'out_%d' % i, banks[i], 'input')
@@ -162,6 +177,16 @@ class ClusterUnit(gvsoc.systree.Component):
                         spatz_lane_width=arch.spatz_lane_width
                     ))
 
+        # REDMUL
+        redmule = LightRedmule(self, f'redmule', tcdm_bank_width=arch.tcdm_bank_width,
+                               tcdm_bank_number=arch.tcdm_bank_nb,
+                               elem_size=arch.redmule_elem_size, ce_height=arch.redmule_ce_height,
+                               ce_width=arch.redmule_ce_width, ce_pipe=arch.redmule_ce_pipe)
+
+        # Interupt Handler
+        itc = Itc_v1(self, "redmule_itc")
+        REDMULE_EVENT = 0
+
         # TCDM
         tcdm = ClusterTcdm(self, 'tcdm', arch)
 
@@ -206,6 +231,10 @@ class ClusterUnit(gvsoc.systree.Component):
                 cores[i].o_VLSU(lane, vlsu_router.i_INPUT())
                 self.bind(vlsu_router, 'output', tcdm, f'in_{arch.num_core + i * arch.spatz_num_lane + lane}')
 
+        # ITC <-> core 0
+        itc.o_IRQ_REQ(cores[0].i_IRQ_REQ())
+        cores[0].o_IRQ_ACK(itc.i_IRQ_ACK())
+
         # Last Core with iDMA
         cores[arch.num_core-1].o_OFFLOAD(idma.i_OFFLOAD())
         idma.o_OFFLOAD_GRANT(cores[arch.num_core-1].i_OFFLOAD_GRANT())
@@ -221,6 +250,9 @@ class ClusterUnit(gvsoc.systree.Component):
         narrow_axi.o_MAP(self.i_NARROW_SOC())
         narrow_axi.o_MAP(csr.i_INPUT(),             base=arch.reg_base,     size=arch.reg_size,     rm_base=True)
 
+        # HBM
+        instr_router.o_MAP(narrow_axi.i_INPUT(), base=arch.hbm_start_base, size=arch.hbm_node_addr_space, rm_base=False)
+
         # iDMA
         idma.o_TCDM(tcdm.i_DMA_INPUT())
         idma.o_AXI(self.i_WIDE_SOC())
@@ -230,6 +262,16 @@ class ClusterUnit(gvsoc.systree.Component):
 
         # Wide Input from SoC
         self.o_WIDE_INPUT(tcdm.i_BUS_INPUT())
+
+        # binding to redmule
+        narrow_axi.o_MAP(redmule.i_INPUT(), base=arch.redmule_reg_base, size=arch.redmule_reg_size, rm_base=True)
+        narrow_axi.o_MAP(itc.i_INPUT(), base=arch.itc_reg_base, size=arch.itc_reg_size, rm_base=True)
+
+        # RedMulE completion pulse -> ITC event input
+        redmule.o_IRQ(itc.i_EVENT(REDMULE_EVENT))
+
+        #RedMule to TCDM
+        redmule.o_TCDM(tcdm.i_BUS_INPUT())
 
     def set_binary(self, binary):
         # Used by the gvrun flow to provide the binary after construction.

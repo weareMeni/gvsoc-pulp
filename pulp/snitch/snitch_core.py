@@ -241,7 +241,7 @@ class SnitchFast(cpu.iss.riscv.RiscvCommon):
             modules.append(cpu.iss.riscv.ExecInOrder(scoreboard=True))
 
         super().__init__(parent, name, isa=isa_instance, misa=misa, core="snitch", scoreboard=True,
-            fetch_enable=fetch_enable, boot_addr=boot_addr, core_id=core_id, riscv_exceptions=True,
+            fetch_enable=fetch_enable, boot_addr=boot_addr, core_id=core_id, riscv_exceptions=False,
             prefetcher_size=32, htif=htif, binaries=binaries, handle_misaligned=True, custom_sources=True,
             nb_outstanding=nb_outstanding, single_regfile=single_regfile,
             modules=modules, config=config)

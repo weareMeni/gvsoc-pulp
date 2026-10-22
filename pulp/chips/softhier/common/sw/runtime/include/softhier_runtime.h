@@ -1,3 +1,4 @@
+#pragma once
 #ifndef _FLEX_RUNTIME_H_
 #define _FLEX_RUNTIME_H_
 #include "softhier_arch.h"
@@ -15,7 +16,7 @@
  *  Core Position   *
  *******************/
 
-uint32_t flex_get_cluster_id() {
+inline uint32_t flex_get_cluster_id() {
   volatile uint32_t *cluster_reg = (volatile uint32_t *)ARCH_CLUSTER_REG_BASE;
   return *cluster_reg;
 }
@@ -68,7 +69,7 @@ void flex_global_barrier_init() {
   flex_intra_cluster_sync();
 
   if (flex_is_dm_core()) {
-    flex_reset_barrier(barrier);
+    flex_reset_barrier((uint32_t *)barrier);
   }
 
   flex_intra_cluster_sync();
@@ -76,9 +77,10 @@ void flex_global_barrier_init() {
 
 void flex_global_barrier_polling() {
   volatile uint32_t *barrier =
-      (volatile uint32_t *)remote_cid(0, BARRIER_OFFSET);
+    reinterpret_cast<volatile uint32_t *>(remote_cid(0, BARRIER_OFFSET));
+
   volatile uint32_t *barrier_iter =
-      (volatile uint32_t *)remote_cid(0, BARRIER_ITER_OFFSET);
+    reinterpret_cast<volatile uint32_t *>(remote_cid(0, BARRIER_ITER_OFFSET));
 
   flex_intra_cluster_sync();
 
@@ -87,9 +89,9 @@ void flex_global_barrier_polling() {
     uint32_t prev_barrier_iteration = *barrier_iter;
 
     if ((ARCH_NUM_CLUSTER - flex_get_enable_value()) ==
-        flex_amo_fetch_add(barrier)) {
-      flex_reset_barrier(barrier);
-      flex_amo_fetch_add(barrier_iter);
+        flex_amo_fetch_add((uint32_t *)barrier)) {
+      flex_reset_barrier((uint32_t *)barrier);
+      flex_amo_fetch_add((uint32_t *)barrier_iter);
     } else {
       while ((*barrier_iter) == prev_barrier_iteration);
     }
@@ -110,6 +112,22 @@ void flex_eoc(uint32_t val) {
 void flex_eoc_all(uint32_t val) {
   volatile uint32_t *eoc_reg = (volatile uint32_t *)(ARCH_SOC_REGISTER_EOC + 4);
   *eoc_reg = val;
+}
+
+/*******************
+ *      Memset     *
+ *******************/
+
+extern "C" void* memset(void* dest, int value, size_t count)
+{
+    auto* p = static_cast<volatile unsigned char*>(dest);
+    const unsigned char byte = static_cast<unsigned char>(value);
+
+    for (size_t i = 0; i < count; ++i) {
+        p[i] = byte;
+    }
+
+    return dest;
 }
 
 /*******************
@@ -139,7 +157,7 @@ void flex_log_char(char c) {
   *log_reg = data;
 }
 
-void flex_print(char *str) {
+void flex_print(const char *str) {
   for (int i = 0; str[i] != '\0'; i++) {
     flex_log_char(str[i]);
   }

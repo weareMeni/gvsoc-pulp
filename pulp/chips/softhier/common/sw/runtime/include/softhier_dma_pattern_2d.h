@@ -71,21 +71,21 @@ static inline FlexPosition2D bottom_pos(FlexPosition2D pos) {
  *******************************************/
 
 // Pattern: Round Shift Right
-static inline void flex_dma_async_pattern_round_shift_right(uint32_t local_offset, uint32_t remote_offset, size_t transfer_size) {
+static inline uint32_t flex_dma_async_pattern_round_shift_right(uint32_t local_offset, uint32_t remote_offset, size_t transfer_size) {
     FlexPosition2D pos = get_pos(flex_get_cluster_id());
-    bare_dma_start_1d(local(local_offset), remote_pos(left_pos(pos), remote_offset), transfer_size); // Start iDMA
+    return bare_dma_start_1d(local(local_offset), remote_pos(left_pos(pos), remote_offset), transfer_size); // Start iDMA
 }
 
 // Pattern: Round Shift Up
-static inline void flex_dma_async_pattern_round_shift_up(uint32_t local_offset, uint32_t remote_offset, size_t transfer_size) {
+static inline uint32_t flex_dma_async_pattern_round_shift_up(uint32_t local_offset, uint32_t remote_offset, size_t transfer_size) {
     FlexPosition2D pos = get_pos(flex_get_cluster_id());
-    bare_dma_start_1d(local(local_offset), remote_pos(bottom_pos(pos), remote_offset), transfer_size); // Start iDMA
+    return bare_dma_start_1d(local(local_offset), remote_pos(bottom_pos(pos), remote_offset), transfer_size); // Start iDMA
 }
 
 // Pattern Dialog-to-Dialog: Transpose the X and Y coordinates in the 2D grid
-static inline void flex_dma_async_pattern_dialog_to_dialog(uint32_t local_offset, uint32_t remote_offset, size_t transfer_size) {
+static inline uint32_t flex_dma_async_pattern_dialog_to_dialog(uint32_t local_offset, uint32_t remote_offset, size_t transfer_size) {
     FlexPosition2D pos = get_pos(flex_get_cluster_id());
-    bare_dma_start_1d(local(local_offset), remote_xy(pos.y, pos.x, remote_offset), transfer_size); // Start iDMA
+    return bare_dma_start_1d(local(local_offset), remote_xy(pos.y, pos.x, remote_offset), transfer_size); // Start iDMA
 }
 
 #endif // _FLEX_DMA_PATTERN_2D_H_

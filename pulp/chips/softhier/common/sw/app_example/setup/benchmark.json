@@ -1,0 +1,10 @@
+{
+  "max_dimensions": {
+    "M": 2048,
+    "N": 2048,
+    "K": 2048
+  },
+  "dtype": "fp16",
+  "seed": 42,
+  "alignment": 64
+}

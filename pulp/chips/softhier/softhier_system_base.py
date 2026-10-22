@@ -51,10 +51,6 @@ def _ni_node_name(arch, cluster_id):
         x = cluster_id % arch.num_cluster_x
         y = cluster_id // arch.num_cluster_x
         return f"cluster_{x}_{y}_ni"
-    if getattr(arch, 'dram_type', None) is not None:
-            x = cluster_id % arch.num_cluster_x
-            y = cluster_id // arch.num_cluster_x
-            return f"hbm_chan_{x}_{y}_ni"
     return f"cluster_{cluster_id}_ni"
 
 
@@ -118,12 +114,22 @@ class SoftHierSystem(gvsoc.systree.Component):
                                         tcdm_size=arch.cluster_tcdm_size,
                                         stack_base=arch.cluster_stack_base,
                                         stack_size=arch.cluster_stack_size,
+                                        hbm_start_base=arch.hbm_start_base,
+                                        hbm_node_addr_space=arch.hbm_node_addr_space,
                                         zomem_base=arch.cluster_zomem_base,
                                         zomem_size=arch.cluster_zomem_size,
                                         reg_base=arch.cluster_reg_base,
                                         reg_size=arch.cluster_reg_size,
                                         idma_outstand_txn=arch.idma_outstand_txn,
-                                        idma_outstand_burst=arch.idma_outstand_burst)
+                                        idma_outstand_burst=arch.idma_outstand_burst,
+                                        redmule_ce_height=arch.redmule_ce_height,
+                                        redmule_ce_width=arch.redmule_ce_width,
+                                        redmule_ce_pipe=arch.redmule_ce_pipe,
+                                        redmule_elem_size=arch.redmule_elem_size,
+                                        redmule_reg_base=arch.redmule_reg_base,
+                                        redmule_reg_size=arch.redmule_reg_size,
+                                        itc_reg_base=arch.itc_reg_base,
+                                        itc_reg_size=arch.itc_reg_size)
             cluster_list.append(ClusterUnit(self, f'cluster_{cluster_id}', cluster_arch, binary))
 
         # Keep the clusters so configure() can push the binary to their loaders when
@@ -190,16 +196,28 @@ class SoftHierSystem(gvsoc.systree.Component):
             narrow_arbiter = router.Router(self, f'narrow_arbiter_{cluster_id}', bandwidth=8)
             narrow_arbiter.o_MAP(virtual_interco.i_INPUT())
             narrow_arbiter.o_MAP(noc.i_NARROW_INPUT(ni_node_id),
+                                 name="tcdm",
                                  base=arch.cluster_tcdm_remote,
                                  size=arch.num_cluster * arch.cluster_tcdm_size,
+                                 rm_base=False)
+            narrow_arbiter.o_MAP(noc.i_NARROW_INPUT(ni_node_id),
+                                 name="hbm",
+                                 base=arch.hbm_start_base,
+                                 size=arch.num_cluster * arch.hbm_node_addr_space,
                                  rm_base=False)
 
             wide_arbiter = router.Router(self, f'wide_arbiter_{cluster_id}', bandwidth=arch.noc_link_width)
             wide_arbiter.o_MAP(virtual_interco.i_INPUT())
             wide_arbiter.o_MAP(noc.i_WIDE_INPUT(ni_node_id),
-                                 base=arch.cluster_tcdm_remote,
-                                 size=arch.num_cluster * arch.cluster_tcdm_size,
-                                 rm_base=False)
+                               name="tcdm",
+                               base=arch.cluster_tcdm_remote,
+                               size=arch.num_cluster * arch.cluster_tcdm_size,
+                               rm_base=False)
+            wide_arbiter.o_MAP(noc.i_WIDE_INPUT(ni_node_id),
+                               name="hbm",
+                               base=arch.hbm_start_base,
+                               size=arch.num_cluster * arch.hbm_node_addr_space,
+                               rm_base=False)
 
             cluster_list[cluster_id].o_NARROW_SOC(narrow_arbiter.i_INPUT())
             cluster_list[cluster_id].o_WIDE_SOC(wide_arbiter.i_INPUT())
@@ -221,12 +239,26 @@ class SoftHierSystem(gvsoc.systree.Component):
 
         if getattr(arch, 'num_cluster_x', None) is not None:
             for chan_id in range(arch.num_cluster):
-                    ni_node_id = noc.id_map[_ni_node_name(arch, chan_id)]
-                    noc.o_NARROW_MAP(hbm_chan_list[chan_id].i_INPUT(),
-                                     base=arch.hbm_start_base + chan_id * arch.hbm_node_addr_space,
-                                     size=arch.hbm_node_addr_space,
-                                     node_id=ni_node_id,
-                                     rm_base=False)
+                x = chan_id % arch.num_cluster_x
+                y = chan_id // arch.num_cluster_x
+                ni_node_id = noc.id_map[f'dram_chan_{x}_{y}_ni']
+
+                hbm_base = arch.hbm_start_base + chan_id * arch.hbm_node_addr_space
+                hbm_input = hbm_chan_list[chan_id].i_INPUT()
+
+                noc.o_NARROW_MAP(hbm_input,
+                                base=hbm_base,
+                                size=arch.hbm_node_addr_space,
+                                node_id=ni_node_id,
+                                rm_base=True)
+
+                wide_name = hbm_input.component.name
+
+                noc.get_property('mappings')[f"wide_{wide_name}"] = {
+                    'base': hbm_base, 'size': arch.hbm_node_addr_space,
+                    'node_id': ni_node_id, 'remove_offset': hbm_base}
+
+                noc.o_WIDE_BIND(hbm_input, ni_node_id)
 
     def configure(self):
         # With gvrun the binary is provided through a parameter (set either from the

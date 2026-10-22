@@ -50,11 +50,19 @@ ifdef app
 	sw_cmake_arg = "-DSRC_DIR=$(app_path)"
 endif
 
-arch_cmake_arg := "-DRISCV_ARCH=rv32imafdv_zfh"
+arch_cmake_arg := "-DRISCV_ARCH=rv32imafd_zfh"
+
+.PHONY: sh-data
+
+sh-data:
+	python3 pulp/pulp/chips/softhier/common/sw/app_example/setup/hbm_gen.py \
+		--config pulp/pulp/chips/softhier/common/sw/app_example/setup/benchmark.json \
+		--output sw_build/hbm
 
 sh-sw:
 	make sh-config
 	rm -rf sw_build && mkdir sw_build
+	$(MAKE) sh-data
 	cd sw_build && $(CMAKE) $(sw_cmake_arg) $(arch_cmake_arg) ../pulp/pulp/chips/softhier/common/sw/ && make
 	@! grep -q "ebreak" sw_build/softhier.dump || (echo "Error: 'ebreak' found in sw_build/softhier.dump" && exit 1)
 
@@ -66,7 +74,7 @@ sh-sw-clean:
 ######################################################################
 
 sh-run:
-	./install/bin/gvsoc --target=pulp.chips.softhier.topologies.$(ACTUAL_TOPO)_target --binary sw_build/softhier.elf $(RUN_ARGS) run
+	./install/bin/gvsoc --target=pulp.chips.softhier.topologies.$(ACTUAL_TOPO)_target --binary sw_build/softhier.elf $(RUN_ARGS) --trace='/system/cluster_0/redmule/.*' --trace='/system/cluster_0/idma.*' run
 
 # Forward DEBUG to the top-level build, not just to make itself.
 build: export DEBUG := $(DEBUG)
