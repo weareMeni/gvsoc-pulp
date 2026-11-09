@@ -19,8 +19,7 @@
 This module provides the :class:`SnitchDmaV3` generator: the xdma offload
 front-end (dmsrc / dmdst / dmstr / dmrep / dmcpy / dmstat instructions of a
 Snitch core) in front of the ND mid-end and an AXI-to-AXI back-end. The
-defaults describe the Spatz cluster DMA. Not yet wired into the Spatz
-cluster, which keeps :class:`ips.pulp.idma_v2.snitch_dma.SnitchDmaV2`.
+defaults describe the Spatz cluster DMA.
 """
 
 from typing_extensions import override
@@ -39,7 +38,7 @@ class SnitchDmaV3(gvsoc.systree.Component):
 
     ``i_OFFLOAD()``: the core's offload wire (synchronous; dmcpy is granted or
     refused inside the call, the grant of a refused one comes back through
-    ``o_OFFLOAD_GRANT`` and the core replays the instruction).
+    ``o_OFFLOAD_GRANT`` and completes the held instruction).
     ``o_AXI_READ`` / ``o_AXI_WRITE``: the AXI masters (IoV2Beat), to bind on
     two distinct interconnect inputs. ``o_IRQ()``: completion pulse.
     ``o_BUSY()``: high while a transfer is queued or in flight.
@@ -63,11 +62,16 @@ class SnitchDmaV3(gvsoc.systree.Component):
 
     def o_AXI_READ(self, itf: gvsoc.systree.SlaveItf):
         """Binds the AXI read master."""
-        self.itf_bind('axi_read', itf, signature=IoV2Beat(self.cfg.axi_width))
+        self.itf_bind('axi_read', itf, signature=IoV2Beat(self.cfg.data_width))
 
     def o_AXI_WRITE(self, itf: gvsoc.systree.SlaveItf):
         """Binds the AXI write master."""
-        self.itf_bind('axi_write', itf, signature=IoV2Beat(self.cfg.axi_width))
+        self.itf_bind('axi_write', itf, signature=IoV2Beat(self.cfg.data_width))
+
+    def i_PERF_EVENTS(self) -> gvsoc.systree.SlaveItf:
+        """Totals of the AXI handshakes, read by the cluster performance
+        counters."""
+        return gvsoc.systree.SlaveItf(self, 'perf_events', signature='wire<SnitchPerfEvents *>')
 
     def o_IRQ(self, itf: gvsoc.systree.SlaveItf):
         """Binds the completion pulse (one per completed transfer)."""

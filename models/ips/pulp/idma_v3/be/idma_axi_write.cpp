@@ -22,14 +22,19 @@
 
 
 
-IdmaAxiWrite::IdmaAxiWrite(vp::Component *top, std::string itf_name, IdmaBackend *be, int width,
-    int burst_len, int num_ax_in_flight, int meta_fifo_depth, bool raw_coupling)
+IdmaAxiWrite::IdmaAxiWrite(vp::Component *top, std::string itf_name, IdmaBackend *be,
+    const IdmaBackendParams &params, const IdmaAxiConfig &cfg)
 :   vp::Block(top, itf_name),
     be(be),
     bus(&IdmaAxiWrite::retry_meth, &IdmaAxiWrite::resp_meth),
-    width(width),
-    num_ax_in_flight(num_ax_in_flight),
-    raw_coupling(raw_coupling)
+    width(params.width),
+    num_ax_in_flight(params.num_ax_in_flight),
+    raw_coupling(params.raw_coupling),
+    sig_w_addr(*this, "w_addr", 32, vp::SignalCommon::ResetKind::HighZ),
+    sig_w_size(*this, "w_size", 8, vp::SignalCommon::ResetKind::HighZ),
+    sig_w_last(*this, "w_last", 1, vp::SignalCommon::ResetKind::HighZ),
+    sig_w_wait(*this, "w_wait", 1, vp::SignalCommon::ResetKind::HighZ),
+    sig_b(*this, "b", 8, vp::SignalCommon::ResetKind::HighZ)
 {
     top->new_master_port(itf_name, &this->bus, this);
 
@@ -38,11 +43,11 @@ IdmaAxiWrite::IdmaAxiWrite(vp::Component *top, std::string itf_name, IdmaBackend
     this->req_allocator = vp::IoReqAllocator::get(0);
 
     int log2_width = 0;
-    while ((1 << log2_width) < width)
+    while ((1 << log2_width) < this->width)
     {
         log2_width++;
     }
-    int page_bits = log2_width + burst_len;
+    int page_bits = log2_width + cfg.burst_len;
     if (page_bits > 12)
     {
         page_bits = 12;
@@ -51,12 +56,17 @@ IdmaAxiWrite::IdmaAxiWrite(vp::Component *top, std::string itf_name, IdmaBackend
 
     // A burst lives from its AW to its B: at most meta_fifo_depth of them
     // (the w_last FIFO bounds them), plus one for same-cycle recycling
-    int nb_ctxs = (meta_fifo_depth > 0 ? meta_fifo_depth : num_ax_in_flight + 3) + 1;
+    int nb_ctxs = (params.meta_fifo_depth > 0 ? params.meta_fifo_depth
+        : params.num_ax_in_flight + 3) + 1;
     this->ctxs.resize(nb_ctxs);
+    this->sig_burst.reserve(nb_ctxs);
     for (int i = 0; i < nb_ctxs; i++)
     {
+        this->sig_burst.emplace_back(*this, "burst_" + std::to_string(i), 32,
+            vp::SignalCommon::ResetKind::HighZ);
         this->ctxs[i].slot = i;
-        this->ctxs[i].stage.resize(this->page_size + width);
+        this->ctxs[i].stage.resize(this->page_size + this->width);
+        this->ctxs[i].strb.resize(this->page_size + this->width);
     }
 }
 
@@ -81,6 +91,12 @@ void IdmaAxiWrite::reset(bool active)
             this->held_beat = nullptr;
         }
         this->held_ctx = nullptr;
+        this->w_waiting = false;
+        this->perf_aw_done = 0;
+        this->perf_aw_bytes = 0;
+        this->perf_w_done = 0;
+        this->perf_w_bytes = 0;
+        this->perf_b_done = 0;
     }
 }
 
@@ -143,6 +159,8 @@ void IdmaAxiWrite::issue_aw(const IdmaSplit &split)
         "Issuing write burst (slot: %d, addr: 0x%lx, beats: %d, aw_issued: %d)\n",
         ctx->slot, split.addr, split.num_beats, ctx->aw_issued);
 
+    this->sig_burst[ctx->slot].set(split.addr);
+
     this->data_queue.push_back(ctx);
 }
 
@@ -183,6 +201,10 @@ bool IdmaAxiWrite::send_beat(vp::IoReq *beat)
 {
     WriteCtx *ctx = (WriteCtx *)beat->initiator;
     bool is_last = beat->is_last;
+    bool is_first = beat->is_first;
+    // A granted beat belongs to the target: read what is traced before
+    uint64_t addr = beat->get_addr();
+    uint64_t size = beat->get_size();
 
     vp::IoReqStatus status = this->bus.req(beat);
 
@@ -190,7 +212,28 @@ bool IdmaAxiWrite::send_beat(vp::IoReq *beat)
     {
         this->held_beat = beat;
         this->held_ctx = ctx;
+        this->w_waiting = true;
+        this->sig_w_wait.set(true);
         return false;
+    }
+
+    if (this->w_waiting)
+    {
+        this->w_waiting = false;
+        this->sig_w_wait.release();
+    }
+    this->sig_w_addr.set_and_release(addr);
+    this->sig_w_size.set_and_release(size);
+    if (is_first)
+    {
+        this->perf_aw_done++;
+        this->perf_aw_bytes += (uint64_t)ctx->num_beats * this->width;
+    }
+    this->perf_w_done++;
+    this->perf_w_bytes += size;
+    if (is_last)
+    {
+        this->sig_w_last.set_and_release(true);
     }
 
     if (status == vp::IO_REQ_DONE)
@@ -242,8 +285,8 @@ bool IdmaAxiWrite::tick(int64_t now)
 
     IdmaSplit *split;
     int beat_idx;
-    uint64_t mask;
-    if (!this->be->write_beat_ready(this, &split, &beat_idx, &mask, now))
+    IdmaBeatBytes bytes;
+    if (!this->be->write_beat_ready(this, &split, &beat_idx, &bytes, now))
     {
         return false;
     }
@@ -253,10 +296,11 @@ bool IdmaAxiWrite::tick(int64_t now)
     bool is_last = beat_idx == split->num_beats - 1;
 
     uint8_t *bus_word = ctx->stage.data() + beat_idx * this->width;
-    this->be->write_beat_take(this, bus_word, now);
+    uint8_t *strb = ctx->strb.data() + beat_idx * this->width;
+    bool masked = this->be->write_beat_take(this, bus_word, now, strb);
 
-    int first = __builtin_ctzll(mask);
-    int count = __builtin_popcountll(mask);
+    int first = bytes.first;
+    int count = bytes.count;
 
     vp::IoReq *beat = this->req_allocator->alloc();
     beat->prepare();
@@ -264,6 +308,10 @@ bool IdmaAxiWrite::tick(int64_t now)
     beat->set_addr((split_addr & ~(uint64_t)(this->width - 1)) + beat_idx * this->width + first);
     beat->set_size(count);
     beat->set_data(bus_word + first);
+    if (masked)
+    {
+        beat->set_strb(strb + first);
+    }
     beat->is_first = beat_idx == 0;
     beat->is_last = is_last;
     beat->burst_id = ctx->slot;
@@ -342,6 +390,9 @@ void IdmaAxiWrite::complete(WriteCtx *ctx, vp::IoRespStatus status)
     this->trace.msg(vp::Trace::LEVEL_TRACE, "Write burst acknowledged (slot: %d)\n", ctx->slot);
 
     ctx->in_use = false;
+    this->sig_burst[ctx->slot].release();
+    this->sig_b.set_and_release(ctx->slot);
+    this->perf_b_done++;
     this->free_ctxs.push_back(ctx);
 
     this->be->write_burst_done(this, status == vp::IO_RESP_INVALID);

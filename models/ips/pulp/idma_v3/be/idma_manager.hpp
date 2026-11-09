@@ -63,6 +63,8 @@ public:
     /// Called by the back-end tick after this cycle's buffer pops: a response
     /// beat held back because the buffer was full may be offered again.
     virtual void retry_held_beat() = 0;
+    /// True while a response beat is held for lack of room in the buffer.
+    virtual bool holding_beat() { return false; }
 
     /// True while a split is issued or a response is outstanding.
     virtual bool busy() = 0;
@@ -100,4 +102,7 @@ public:
     /// keeps the lines of an ND transfer from overlapping on the hardware.
     /// Protocols that accept addresses ahead of the data leave this at 0.
     virtual int aw_unissued() { return 0; }
+
+    /// Splits the address FIFO in front of the manager holds (see aw_unissued).
+    virtual int aw_depth() { return 0; }
 };

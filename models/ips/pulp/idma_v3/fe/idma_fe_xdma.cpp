@@ -27,9 +27,10 @@
 
 
 
-IdmaFeXdma::IdmaFeXdma(vp::Component *top, IdmaFeSink *me)
+IdmaFeXdma::IdmaFeXdma(vp::Component *top, IdmaFeSink *me, int push_delay)
 :   Block(top, "fe"),
     me(me),
+    push_delay(push_delay),
     done_event(this, &IdmaFeXdma::done_handler),
     src(*this, "src", 64),
     dst(*this, "dst", 64),
@@ -62,7 +63,7 @@ void IdmaFeXdma::reset(bool active)
         }
         this->pending_done = 0;
         this->busy = false;
-        this->grant_replay = false;
+        this->compute = IdmaComputeCfg();
     }
 }
 
@@ -111,7 +112,42 @@ void IdmaFeXdma::offload_sync(vp::Block *__this, IssOffloadInsn<uint32_t> *insn)
         case 0b0000100:
             insn->result = _this->get_status(insn->arg_b);
             break;
+        case 0b0001010:
+            _this->set_compute(insn->arg_a, insn->arg_b);
+            break;
     }
+}
+
+
+
+// DMOPC: decode the operation (idma_inst64_compute_pkg::opc_decode, from
+// idma_dmopc.yml) and keep it for the next transfers. An unknown opcode
+// byte decodes to a plain copy.
+void IdmaFeXdma::set_compute(uint32_t opcode, uint32_t params)
+{
+    IdmaComputeCfg cfg;
+    switch (opcode & 0xff)
+    {
+        case 0x08: break;
+        case 0x20: cfg.op = IDMA_COMPUTE_MXQUANT; break;
+        case 0x21: cfg.op = IDMA_COMPUTE_MXDEQUANT; break;
+        case 0x22: cfg.op = IDMA_COMPUTE_MXQUANT_FP16; break;
+        case 0x23: cfg.op = IDMA_COMPUTE_MXDEQUANT_FP16; break;
+        case 0x50:
+            cfg.op = IDMA_COMPUTE_TRANSPOSE;
+            cfg.mode = (opcode >> 16) & 0x3;
+            cfg.tensor_m = params & 0xfff;
+            cfg.tensor_n = (params >> 12) & 0xfff;
+            break;
+        default:
+            this->trace.warning("Unknown DMOPC opcode byte 0x%x, using a plain copy\n",
+                opcode & 0xff);
+            break;
+    }
+
+    this->trace.msg(vp::Trace::LEVEL_TRACE, "Received dmopc (opcode: 0x%x, params: 0x%x, op: %d)\n",
+        opcode, params, cfg.op);
+    this->compute = cfg;
 }
 
 
@@ -130,30 +166,11 @@ uint32_t IdmaFeXdma::get_status(uint32_t status)
 
 
 
-// dmcpy / dmcpyi. Three situations, all decided inside the core's call:
-// - a transfer is stalled (FIFO was full): the core is replaying the
-//   instruction, refuse again;
-// - the grant just went back: this is the replay that completes the
-//   instruction, answer with the id already allocated, nothing to enqueue;
-// - otherwise allocate the id and push, or stall if the FIFO is full.
+// dmcpy / dmcpyi: allocate the id and push, or, if the FIFO is full, refuse
+// the grant and keep the transfer until me_ready(). As on the RTL, the core
+// holds the instruction and does not send it again: the grant completes it.
 uint32_t IdmaFeXdma::enqueue_copy(uint32_t config, uint32_t size, bool &granted)
 {
-    if (this->stalled != nullptr)
-    {
-        // The core replays the instruction while its grant is refused:
-        // nothing new to enqueue until the grant went back
-        granted = false;
-        return this->stalled->id;
-    }
-
-    if (this->grant_replay)
-    {
-        // The replay following the grant: the transfer is already queued
-        this->grant_replay = false;
-        granted = true;
-        return this->grant_id;
-    }
-
     uint32_t transfer_id = this->next_transfer_id.get();
     uint32_t next = transfer_id + 1;
     if (next < FIRST_ID) next = FIRST_ID;
@@ -170,6 +187,7 @@ uint32_t IdmaFeXdma::enqueue_copy(uint32_t config, uint32_t size, bool &granted)
     req->decouple_rw = config & 1;
     req->src_prot = IDMA_PROT_AXI;
     req->dst_prot = IDMA_PROT_AXI;
+    req->compute = this->compute;
     req->id = transfer_id;
     req->stream = 0;
 
@@ -183,7 +201,7 @@ uint32_t IdmaFeXdma::enqueue_copy(uint32_t config, uint32_t size, bool &granted)
     if (this->me->can_accept_nd())
     {
         granted = true;
-        this->me->push_nd(req, 0);
+        this->me->push_nd(req, this->push_delay);
     }
     else
     {
@@ -208,10 +226,8 @@ void IdmaFeXdma::me_ready()
 
         IdmaNdReq *req = this->stalled;
         this->stalled = nullptr;
-        this->grant_replay = true;
-        this->grant_id = req->id;
 
-        this->me->push_nd(req, 0);
+        this->me->push_nd(req, this->push_delay);
         IssOffloadInsnGrant<uint32_t> offload_grant = { .result = req->id };
         this->offload_grant_itf.sync(&offload_grant);
     }

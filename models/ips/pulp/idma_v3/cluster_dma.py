@@ -50,18 +50,22 @@ class ClusterDmaV3(gvsoc.systree.Component):
     0x000   CONF            bits 11:10 enable_nd (0 1D, 1 2D, 2 3D), 14:12
                             source protocol, 17:15 destination protocol
                             (AXI 0, OBI 1), bit 0 decouple_rw
-    0x004   STATUS_0        busy bits of stream 0
-    0x008   STATUS_1        busy bits of stream 1
-    0x00C   NEXT_ID_0       read: launch on stream 0, returns the id
-    0x010   NEXT_ID_1       read: launch on stream 1, returns the id
-    0x014   DONE_ID_0       completion counter of stream 0
-    0x018   DONE_ID_1       completion counter of stream 1
+    0x004   STATUS_0        busy bits of stream 0 (STATUS_1 at 0x008)
+    0x044   NEXT_ID_0       read: launch on stream 0, returns the id
+                            (NEXT_ID_1 at 0x048)
+    0x084   DONE_ID_0       completion counter of stream 0 (DONE_ID_1 at
+                            0x088)
     0x0D0   DST_ADDR        destination address
     0x0D8   SRC_ADDR        source address
     0x0E0   LENGTH          bytes of one 1D transfer
     0x0E8   DST_STRIDE_2    0x0F0 SRC_STRIDE_2, 0x0F8 REPS_2
     0x100   DST_STRIDE_3    0x108 SRC_STRIDE_3, 0x110 REPS_3
     ======  ==============  ==============================================
+
+    The STATUS / NEXT_ID / DONE_ID offsets are those of the default
+    ``max_num_streams`` of 16: STATUS_s is at 0x004 + 4 s, NEXT_ID_s at
+    0x004 + 4 (N + s) and DONE_ID_s at 0x004 + 4 (2N + s), N being
+    ``max_num_streams`` (el1: 2, NEXT_ID_0 at 0x00C and DONE_ID_0 at 0x014).
 
     The stream is selected by the NEXT_ID register that is read; the
     protocols must match the stream (stream 0: OBI to AXI, stream 1: AXI to
@@ -90,7 +94,7 @@ class ClusterDmaV3(gvsoc.systree.Component):
         'title': 'Cluster iDMA (v3)',
         'static_page': '../ips/pulp/idma_v3',
         'tests_dirs': [
-            {'dir':       'gvsoc/pulp/tests/idma_v3_cluster',
+            {'dir':       'tests/functional/models/idma_v3_cluster',
              'component': 'ips.pulp.idma_v3.cluster_dma'},
         ],
     }
@@ -126,11 +130,11 @@ class ClusterDmaV3(gvsoc.systree.Component):
 
     def o_AXI_READ(self, itf: gvsoc.systree.SlaveItf):
         """Binds the AXI read master (stream 1 sources)."""
-        self.itf_bind('axi_read', itf, signature=IoV2Beat(self.cfg.axi_width))
+        self.itf_bind('axi_read', itf, signature=IoV2Beat(self.cfg.data_width))
 
     def o_AXI_WRITE(self, itf: gvsoc.systree.SlaveItf):
         """Binds the AXI write master (stream 0 destinations)."""
-        self.itf_bind('axi_write', itf, signature=IoV2Beat(self.cfg.axi_width))
+        self.itf_bind('axi_write', itf, signature=IoV2Beat(self.cfg.data_width))
 
     def o_EVENT(self, core: int, itf: gvsoc.systree.SlaveItf):
         """Binds the completion event of one core (pulsed on every completion)."""
@@ -147,6 +151,9 @@ class ClusterDmaV3(gvsoc.systree.Component):
     @override
     def gen_gui(self, parent_signal: Signal):
         dma = Signal(self, parent_signal, name=self.name)
+        # The completion event, raised on the cores and on the FC at once
+        _ = Signal(self, dma, name='irq', path='fe/irq', groups='regmap',
+            display=DisplayPulse())
         for stream in range(2):
             active = Signal(self, dma, name=f'stream{stream}', path=f'fe/stream{stream}/busy',
                 groups='regmap', display=DisplayLogicBox('ACTIVE'))
@@ -154,6 +161,78 @@ class ClusterDmaV3(gvsoc.systree.Component):
                 display=DisplayPulse())
             _ = Signal(self, active, name='buffer_fill', path=f'be{stream}/buffer_fill',
                 groups='regmap')
+            # Completion: the identifier counted done, DONE_ID and the transfers
+            # still queued in front of the stream
+            _ = Signal(self, active, name='done', path=f'fe/stream{stream}/done', groups='regmap',
+                display=DisplayPulse())
+            _ = Signal(self, active, name='done_id', path=f'fe/stream{stream}/done_id',
+                groups='regmap')
+            _ = Signal(self, active, name='queue', path=f'me{stream}/queue', groups='regmap')
+
+            # Where the transfer is: the line handed to the back-end, and the
+            # burst the legalizer comes to on each side
+            progress = Signal(self, active, name='progress', path=f'me{stream}/line',
+                groups='regmap')
+            _ = Signal(self, progress, name='lines_left', path=f'me{stream}/lines_left',
+                groups='regmap')
+            _ = Signal(self, progress, name='src', path=f'me{stream}/src', groups='regmap')
+            _ = Signal(self, progress, name='dst', path=f'me{stream}/dst', groups='regmap')
+            _ = Signal(self, progress, name='read_addr', path=f'be{stream}/r_addr',
+                groups='regmap')
+            _ = Signal(self, progress, name='read_left', path=f'be{stream}/r_left',
+                groups='regmap')
+            _ = Signal(self, progress, name='write_addr', path=f'be{stream}/w_addr',
+                groups='regmap')
+            _ = Signal(self, progress, name='write_left', path=f'be{stream}/w_left',
+                groups='regmap')
+
+            # What holds the data path of the stream
+            _ = Signal(self, active, name='buffer_full', path=f'be{stream}/buffer_full',
+                groups='regmap', display=DisplayLogicBox('FULL'))
+            _ = Signal(self, active, name='buffer_empty', path=f'be{stream}/buffer_empty',
+                groups='regmap', display=DisplayLogicBox('EMPTY'))
+
+        # The buses. Stream 0 writes the AXI and stream 1 reads it; the TCDM
+        # read ports are shared by the two streams, the write ports are
+        # stream 1's.
+        axi_read = Signal(self, dma, name='axi_read', path='axi_read/r_addr', groups='regmap')
+        _ = Signal(self, axi_read, name='ar_addr', path='axi_read/ar_addr', groups='regmap')
+        _ = Signal(self, axi_read, name='ar_beats', path='axi_read/ar_beats', groups='regmap')
+        _ = Signal(self, axi_read, name='ar_wait', path='axi_read/ar_wait', groups='regmap',
+            display=DisplayLogicBox('WAIT'))
+        _ = Signal(self, axi_read, name='r_last', path='axi_read/r_last', groups='regmap',
+            display=DisplayPulse())
+        _ = Signal(self, axi_read, name='r_wait', path='axi_read/r_wait', groups='regmap',
+            display=DisplayLogicBox('WAIT'))
+        bursts = Signal(self, axi_read, name='bursts')
+        for slot in range(self.cfg.num_ax_in_flight + 1):
+            _ = Signal(self, bursts, name=f'burst_{slot}', path=f'axi_read/burst_{slot}',
+                groups='regmap')
+
+        axi_write = Signal(self, dma, name='axi_write', path='axi_write/w_addr', groups='regmap')
+        _ = Signal(self, axi_write, name='w_size', path='axi_write/w_size', groups='regmap')
+        _ = Signal(self, axi_write, name='w_last', path='axi_write/w_last', groups='regmap',
+            display=DisplayPulse())
+        _ = Signal(self, axi_write, name='w_wait', path='axi_write/w_wait', groups='regmap',
+            display=DisplayLogicBox('WAIT'))
+        _ = Signal(self, axi_write, name='b', path='axi_write/b', groups='regmap',
+            display=DisplayPulse())
+        bursts = Signal(self, axi_write, name='bursts')
+        nb_write_slots = (self.cfg.meta_fifo_depth if self.cfg.meta_fifo_depth > 0
+            else self.cfg.num_ax_in_flight + 3) + 1
+        for slot in range(nb_write_slots):
+            _ = Signal(self, bursts, name=f'burst_{slot}', path=f'axi_write/burst_{slot}',
+                groups='regmap')
+
+        for name in ['tcdm_read', 'tcdm_write']:
+            tcdm = Signal(self, dma, name=name, path=f'{name}/addr', groups='regmap')
+            _ = Signal(self, tcdm, name='size', path=f'{name}/size', groups='regmap')
+            _ = Signal(self, tcdm, name='grant_wait', path=f'{name}/grant_wait',
+                groups='regmap', display=DisplayLogicBox('WAIT'))
+            for port in range(self.cfg.obi.nb_ports(self.cfg.data_width)):
+                _ = Signal(self, tcdm, name=f'port[{port}]', path=f'{name}/port_{port}',
+                    groups='regmap')
+
         for port in range(self.cfg.nb_reg_ports):
             regs = Signal(self, dma, name=f'port{port}')
             _ = Signal(self, regs, name='source', path=f'fe/port{port}/src', groups='regmap')

@@ -17,6 +17,7 @@
 """Configuration dataclass for :class:`ips.pulp.idma_v3.snitch_dma.SnitchDmaV3`."""
 
 from config_tree import Config, cfg_field
+from ips.pulp.idma_v3.protocol_config import IdmaAxiConfig
 
 
 class SnitchDmaV3Config(Config):
@@ -27,9 +28,9 @@ class SnitchDmaV3Config(Config):
     mid-end.
     """
 
-    axi_width: int = cfg_field(default=64, desc=(
-        "Width of the data path and of the AXI masters in bytes (the RTL "
-        "DataWidth / 8)."
+    data_width: int = cfg_field(default=64, desc=(
+        "Width of the data path and of the AXI masters in bytes, a power of "
+        "two (the RTL DataWidth / 8)."
     ))
 
     num_ax_in_flight: int = cfg_field(default=3, desc=(
@@ -47,11 +48,8 @@ class SnitchDmaV3Config(Config):
         "derives it as buffer_depth + num_ax_in_flight."
     ))
 
-    burst_len: int = cfg_field(default=6, desc=(
-        "log2 of the AXI burst length in bus words: a burst never crosses a "
-        "2^(log2(axi_width) + burst_len) byte boundary, capped at the 4 KiB "
-        "AXI page (the RTL Burst_len, 8 upstream)."
-    ))
+    axi: IdmaAxiConfig = cfg_field(default_factory=lambda: IdmaAxiConfig(burst_len=6),
+        desc="Parameters of the AXI read and write managers.")
 
     raw_coupling: bool = cfg_field(default=True, desc=(
         "Read/write channel coupler (the RTL RAWCouplingAvail): the address "
@@ -65,4 +63,22 @@ class SnitchDmaV3Config(Config):
 
     nb_dims: int = cfg_field(default=2, desc=(
         "Dimensions the mid-end iterates (1 to 3)."
+    ))
+
+    enable_compute: bool = cfg_field(default=False, desc=(
+        "On-the-fly compute engine (the RTL DMAEnableCompute): DMOPC selects "
+        "a transpose or an MX quant / dequant for the next transfers. "
+        "Without it they are plain copies."
+    ))
+
+    transpose_full_duplex: bool = cfg_field(default=True, desc=(
+        "Two tile banks in the transpose engine (the RTL ComputeTuning "
+        "transpose_full_duplex): a tile fills while the previous one drains. "
+        "With one bank, transposes run at half rate."
+    ))
+
+    offload_req_latency: int = cfg_field(default=0, desc=(
+        "Cycles between the offload of a dmcpy by the core and the entry of "
+        "its transfer into the mid-end (1 for the Snitch RegisterOffloadReq "
+        "register)."
     ))

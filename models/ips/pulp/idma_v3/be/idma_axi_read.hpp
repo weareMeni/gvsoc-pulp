@@ -24,8 +24,10 @@
 #include <vector>
 #include <vp/vp.hpp>
 #include <vp/itf/io_v2.hpp>
+#include <vp/signal.hpp>
 #include "idma_manager.hpp"
 #include "idma_be.hpp"
+#include <ips/pulp/idma_v3/protocol_config/idma_axi_config.hpp>
 
 /**
  * @brief AXI read manager (idma_axi_read + its AR channel), an io_v2 beat
@@ -50,11 +52,12 @@ public:
     ///                         it under @p itf_name.
     /// @param itf_name         Port and block name (axi_read).
     /// @param be               Back-end the beats are pushed into.
-    /// @param width            Data path width in bytes (the beat size).
-    /// @param burst_len        log2 of the burst length in bus words.
-    /// @param num_ax_in_flight Outstanding bursts (contexts kept).
-    IdmaAxiRead(vp::Component *top, std::string itf_name, IdmaBackend *be, int width,
-        int burst_len, int num_ax_in_flight);
+    /// @param params           Back-end parameters: the data path width (the
+    ///                         beat size) and the outstanding bursts
+    ///                         (contexts kept).
+    /// @param cfg              AXI parameters (burst length).
+    IdmaAxiRead(vp::Component *top, std::string itf_name, IdmaBackend *be,
+        const IdmaBackendParams &params, const IdmaAxiConfig &cfg);
 
     /// Hardware reset: frees every outstanding request.
     void reset(bool active) override;
@@ -68,7 +71,17 @@ public:
     bool ar_ready() override;
     void *issue_ar(const IdmaSplit &split) override;
     void retry_held_beat() override;
+    bool holding_beat() override { return this->held_resp != nullptr; }
     bool busy() override;
+
+    /// The bus master, for a component binding it to one of its own blocks.
+    vp::IoMaster &master() { return this->bus; }
+
+    /// Handshakes since reset, for performance counters: AR, bytes of the
+    /// accepted bursts, R beats.
+    uint64_t perf_ar_done = 0;
+    uint64_t perf_ar_bytes = 0;
+    uint64_t perf_r_done = 0;
 
 private:
     /// One outstanding read burst.
@@ -114,4 +127,21 @@ private:
     vp::IoReq *held_resp = nullptr;
     /// Scratch bus word the beat payload is aligned into.
     std::vector<uint8_t> bus_word;
+
+    /// The address channel has taken a burst (pulses: its address, its beats)
+    void trace_ar(vp::IoReq *req, int beats);
+
+    // GUI signals, high-Z when nothing happens. ar_addr / ar_beats pulse when
+    // a burst is taken by the bus, ar_wait is up while the bus refuses it;
+    // r_addr / r_last pulse on every response beat entering the buffer,
+    // r_wait is up while a beat is held for lack of room in the buffer;
+    // burst[slot] holds the address of an outstanding burst from its request
+    // to its last beat.
+    vp::Signal<uint32_t> sig_ar_addr;
+    vp::Signal<uint32_t> sig_ar_beats;
+    vp::Signal<bool> sig_ar_wait;
+    vp::Signal<uint32_t> sig_r_addr;
+    vp::Signal<bool> sig_r_last;
+    vp::Signal<bool> sig_r_wait;
+    std::vector<vp::Signal<uint32_t>> sig_burst;
 };

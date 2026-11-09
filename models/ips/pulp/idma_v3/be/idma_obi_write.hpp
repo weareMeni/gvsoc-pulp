@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 #include <vp/vp.hpp>
@@ -48,7 +49,15 @@ public:
     /// @param be    Back-end the words are popped from.
     /// @param ports Port group the words are written through; registers as
     ///              its client.
-    IdmaObiWrite(vp::Component *top, std::string name, IdmaBackend *be, IdmaObiPortGroup *ports);
+    IdmaObiWrite(vp::Component *top, std::string name, IdmaBackend *be, IdmaObiPortGroup *ports,
+        int aw_fifo_depth=2);
+
+    /// Manager with a port group of its own, named @p name (its ports are
+    /// name_0, name_1, ...); the manager block is name_mgr.
+    /// @param data_width Data path width in bytes, the access of the group.
+    /// @param cfg        OBI parameters of the group.
+    IdmaObiWrite(vp::Component *top, std::string name, IdmaBackend *be, int data_width,
+        const IdmaObiConfig &cfg);
 
     /// Hardware reset: empties the address FIFO and the word slots.
     void reset(bool active) override;
@@ -61,6 +70,7 @@ public:
     void issue_aw(const IdmaSplit &split) override;
     bool tick(int64_t now) override;
     int aw_unissued() override;
+    int aw_depth() override { return this->aw_fifo_depth; }
     bool busy() override;
 
     // IdmaObiClient (see idma_obi_port_group.hpp)
@@ -79,11 +89,15 @@ private:
 
     IdmaBackend *be;
     IdmaObiPortGroup *ports;
+    /// The port group, when the manager owns it.
+    std::unique_ptr<IdmaObiPortGroup> own_ports;
     vp::Trace trace;
     /// Access width of the port group in bytes (the data path width).
     int width;
 
-    /// Address FIFO (the split of each pending write), registered, depth 2.
+    /// Depth of the address FIFO.
+    int aw_fifo_depth;
+    /// Address FIFO (the split of each pending write), registered.
     IdmaTimedFifo<IdmaSplit> aw_fifo;
     /// Word slots (a few, one transaction is outstanding at a time) and the
     /// number in use.

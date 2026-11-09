@@ -23,18 +23,17 @@
 // Words alive at once: one being granted, one awaiting its response, plus
 // margin
 #define NB_WORDS 4
-// The RTL aw FIFO in front of the OBI write manager
-#define AW_FIFO_DEPTH 2
 
 
 
 IdmaObiWrite::IdmaObiWrite(vp::Component *top, std::string name, IdmaBackend *be,
-    IdmaObiPortGroup *ports)
+    IdmaObiPortGroup *ports, int aw_fifo_depth)
 :   vp::Block(top, name),
     be(be),
     ports(ports),
     width(ports->access_width()),
-    aw_fifo(AW_FIFO_DEPTH)
+    aw_fifo_depth(aw_fifo_depth),
+    aw_fifo(aw_fifo_depth)
 {
     this->traces.new_trace("trace", &this->trace, vp::DEBUG);
 
@@ -45,6 +44,15 @@ IdmaObiWrite::IdmaObiWrite(vp::Component *top, std::string name, IdmaBackend *be
     }
 
     ports->add_client(this);
+}
+
+
+
+IdmaObiWrite::IdmaObiWrite(vp::Component *top, std::string name, IdmaBackend *be, int data_width,
+    const IdmaObiConfig &cfg)
+:   IdmaObiWrite(top, name + "_mgr", be, new IdmaObiPortGroup(top, name, data_width, cfg))
+{
+    this->own_ports.reset(this->ports);
 }
 
 
@@ -104,8 +112,8 @@ bool IdmaObiWrite::obi_has_word()
 
     IdmaSplit *split;
     int beat_idx;
-    uint64_t mask;
-    return this->be->write_beat_ready(this, &split, &beat_idx, &mask, now);
+    IdmaBeatBytes bytes;
+    return this->be->write_beat_ready(this, &split, &beat_idx, &bytes, now);
 }
 
 
@@ -128,8 +136,8 @@ void IdmaObiWrite::obi_issue_word()
 
     IdmaSplit *split;
     int beat_idx;
-    uint64_t mask;
-    this->be->write_beat_ready(this, &split, &beat_idx, &mask, now);
+    IdmaBeatBytes bytes;
+    this->be->write_beat_ready(this, &split, &beat_idx, &bytes, now);
     uint64_t addr = split->addr;
 
     // Address and data together: the word leaves the buffer as it is requested
@@ -137,8 +145,8 @@ void IdmaObiWrite::obi_issue_word()
     this->aw_fifo.pop(now);
     this->last_issue_cycle = now;
 
-    int first = __builtin_ctzll(mask);
-    int count = __builtin_popcountll(mask);
+    int first = bytes.first;
+    int count = bytes.count;
     uint64_t word_addr = (addr & ~(uint64_t)(this->width - 1)) + first;
 
     this->trace.msg(vp::Trace::LEVEL_TRACE, "Issuing write word (addr: 0x%lx, size: %d)\n",

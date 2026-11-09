@@ -21,6 +21,7 @@
 #pragma once
 
 #include <deque>
+#include <memory>
 #include <string>
 #include <vector>
 #include <vp/vp.hpp>
@@ -53,6 +54,13 @@ public:
     ///              other stream's read manager); registers as its client.
     IdmaObiRead(vp::Component *top, std::string name, IdmaBackend *be, IdmaObiPortGroup *ports);
 
+    /// Manager with a port group of its own, named @p name (its ports are
+    /// name_0, name_1, ...); the manager block is name_mgr.
+    /// @param data_width Data path width in bytes, the access of the group.
+    /// @param cfg        OBI parameters of the group.
+    IdmaObiRead(vp::Component *top, std::string name, IdmaBackend *be, int data_width,
+        const IdmaObiConfig &cfg);
+
     /// Hardware reset: drops the presented and held words.
     void reset(bool active) override;
 
@@ -63,6 +71,7 @@ public:
     bool ar_ready() override;
     void *issue_ar(const IdmaSplit &split) override;
     void retry_held_beat() override;
+    bool holding_beat() override { return !this->held_resp.empty(); }
     bool busy() override;
 
     // IdmaObiClient (see idma_obi_port_group.hpp)
@@ -84,6 +93,8 @@ private:
 
     IdmaBackend *be;
     IdmaObiPortGroup *ports;
+    /// The port group, when the manager owns it.
+    std::unique_ptr<IdmaObiPortGroup> own_ports;
     vp::Trace trace;
     /// Access width of the port group in bytes (the data path width).
     int width;

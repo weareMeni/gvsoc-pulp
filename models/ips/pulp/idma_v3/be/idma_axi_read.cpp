@@ -23,12 +23,18 @@
 
 
 
-IdmaAxiRead::IdmaAxiRead(vp::Component *top, std::string itf_name, IdmaBackend *be, int width,
-    int burst_len, int num_ax_in_flight)
+IdmaAxiRead::IdmaAxiRead(vp::Component *top, std::string itf_name, IdmaBackend *be,
+    const IdmaBackendParams &params, const IdmaAxiConfig &cfg)
 :   vp::Block(top, itf_name),
     be(be),
     bus(&IdmaAxiRead::retry_meth, &IdmaAxiRead::resp_meth),
-    width(width)
+    width(params.width),
+    sig_ar_addr(*this, "ar_addr", 32, vp::SignalCommon::ResetKind::HighZ),
+    sig_ar_beats(*this, "ar_beats", 16, vp::SignalCommon::ResetKind::HighZ),
+    sig_ar_wait(*this, "ar_wait", 1, vp::SignalCommon::ResetKind::HighZ),
+    sig_r_addr(*this, "r_addr", 32, vp::SignalCommon::ResetKind::HighZ),
+    sig_r_last(*this, "r_last", 1, vp::SignalCommon::ResetKind::HighZ),
+    sig_r_wait(*this, "r_wait", 1, vp::SignalCommon::ResetKind::HighZ)
 {
     // The owning component exposes the bus-facing master under itf_name with
     // this block as callback context. The generator declares IoV2Beat on it.
@@ -39,11 +45,11 @@ IdmaAxiRead::IdmaAxiRead(vp::Component *top, std::string itf_name, IdmaBackend *
     this->req_allocator = vp::IoReqAllocator::get(0);
 
     int log2_width = 0;
-    while ((1 << log2_width) < width)
+    while ((1 << log2_width) < this->width)
     {
         log2_width++;
     }
-    int page_bits = log2_width + burst_len;
+    int page_bits = log2_width + cfg.burst_len;
     if (page_bits > 12)
     {
         page_bits = 12;
@@ -52,13 +58,16 @@ IdmaAxiRead::IdmaAxiRead(vp::Component *top, std::string itf_name, IdmaBackend *
 
     // One context per outstanding burst, plus one so a slot released in the
     // same cycle a split is issued is never needed
-    this->ctxs.resize(num_ax_in_flight + 1);
+    this->ctxs.resize(params.num_ax_in_flight + 1);
+    this->sig_burst.reserve(this->ctxs.size());
     for (int i = 0; i < (int)this->ctxs.size(); i++)
     {
         this->ctxs[i].slot = i;
+        this->sig_burst.emplace_back(*this, "burst_" + std::to_string(i), 32,
+            vp::SignalCommon::ResetKind::HighZ);
     }
 
-    this->bus_word.resize(width);
+    this->bus_word.resize(this->width);
 }
 
 
@@ -95,6 +104,9 @@ void IdmaAxiRead::reset(bool active)
             this->held_ar = nullptr;
         }
         this->held_resp = nullptr;
+        this->perf_ar_done = 0;
+        this->perf_ar_bytes = 0;
+        this->perf_r_done = 0;
     }
 }
 
@@ -148,14 +160,22 @@ void *IdmaAxiRead::issue_ar(const IdmaSplit &split)
 
     this->traces.declare_access(split.addr, split.num_bytes, false);
 
+    this->sig_burst[ctx->slot].set(req->get_addr());
+
     vp::IoReqStatus status = this->bus.req(req);
     if (status == vp::IO_REQ_DENIED)
     {
         // The address channel stays busy until the bus retries
         this->trace.msg(vp::Trace::LEVEL_TRACE, "Read burst denied (slot: %d)\n", ctx->slot);
         this->held_ar = req;
+        this->sig_ar_wait.set(true);
     }
-    else if (status == vp::IO_REQ_DONE)
+    else
+    {
+        this->trace_ar(req, split.num_beats);
+    }
+
+    if (status == vp::IO_REQ_DONE)
     {
         this->trace.force_warning("Read burst answered inline (slot: %d, addr: 0x%lx, "
             "status: %d)\n", ctx->slot, req->get_addr(), req->get_resp_status());
@@ -163,6 +183,16 @@ void *IdmaAxiRead::issue_ar(const IdmaSplit &split)
     }
 
     return ctx;
+}
+
+
+
+void IdmaAxiRead::trace_ar(vp::IoReq *req, int beats)
+{
+    this->sig_ar_addr.set_and_release(req->get_addr());
+    this->sig_ar_beats.set_and_release(beats);
+    this->perf_ar_done++;
+    this->perf_ar_bytes += (uint64_t)beats * this->width;
 }
 
 
@@ -184,6 +214,8 @@ void IdmaAxiRead::retry_meth(vp::Block *__this, vp::IoRetryChannel channel)
     }
 
     _this->held_ar = nullptr;
+    _this->sig_ar_wait.release();
+    _this->trace_ar(req, ((ReadCtx *)req->initiator)->beats_expected);
     if (status == vp::IO_REQ_DONE)
     {
         _this->trace.force_warning("Read burst answered inline on retry (addr: 0x%lx)\n",
@@ -252,11 +284,18 @@ vp::IoRespAck IdmaAxiRead::resp_meth(vp::Block *__this, vp::IoReq *beat)
         _this->trace.msg(vp::Trace::LEVEL_TRACE, "Read beat held (slot: %d, addr: 0x%lx)\n",
             ctx->slot, beat->get_addr());
         _this->held_resp = beat;
+        _this->sig_r_wait.set(true);
         _this->be->wake();
         return vp::IO_RESP_DENIED;
     }
 
     ctx->beats_received++;
+    _this->perf_r_done++;
+    _this->sig_r_addr.set_and_release(beat->get_addr());
+    if (ctx->beats_received == ctx->beats_expected)
+    {
+        _this->sig_r_last.set_and_release(true);
+    }
     beat->free();
 
     if (ctx->beats_received == ctx->beats_expected)
@@ -285,6 +324,7 @@ void IdmaAxiRead::retry_held_beat()
     // The producer re-sends the held beat inside this call; resp_meth then
     // accepts it
     this->held_resp = nullptr;
+    this->sig_r_wait.release();
     this->bus.resp_retry(vp::IO_RETRY_READ);
 }
 
@@ -299,6 +339,7 @@ void IdmaAxiRead::release(ReadCtx *ctx)
         ctx->req = nullptr;
     }
     ctx->in_use = false;
+    this->sig_burst[ctx->slot].release();
     this->free_ctxs.push_back(ctx);
 }
 

@@ -35,7 +35,9 @@ class IdmaBackend;
  *
  * - each side may not cross the boundary its manager reports
  *   (bytes_to_page_boundary(): the AXI page of 2^(offset + burst_len) bytes,
- *   or one bus word for the non-bursting protocols);
+ *   or one bus word for the non-bursting protocols), nor, when the transfer
+ *   reduces the burst length of the side (reduce_len), 2^(offset + max_llen)
+ *   bytes;
  * - in coupled mode (both protocols burst and decouple_rw is clear) both
  *   sides take the shorter of the two and advance together;
  * - otherwise (decoupled) each side advances on its own;
@@ -44,7 +46,9 @@ class IdmaBackend;
  * - the next 1D request is taken in the cycle of the last split, so
  *   consecutive 1D transfers leave no bubble; the first split of a request
  *   comes one cycle after it was taken;
- * - a zero-length request is answered at once without touching the sides.
+ * - a zero-length request is answered at once without touching the sides;
+ * - a request with a compute operation decouples both sides, and the MX
+ *   operations size its write side by their byte ratio.
  */
 class IdmaLegalizer
 {
@@ -65,6 +69,11 @@ public:
     bool r_busy() const { return this->r.valid; }
     /// True while the write side still has bytes to split (w_leg_busy).
     bool w_busy() const { return this->w.valid; }
+    /// Address of the next split of each side and bytes it still has to split.
+    uint64_t r_addr() const { return this->r.addr; }
+    uint64_t r_left() const { return this->r.length; }
+    uint64_t w_addr() const { return this->w.addr; }
+    uint64_t w_left() const { return this->w.length; }
 
 private:
     /// One side of the current request (the RTL r_tf_q / w_tf_q register).
@@ -77,11 +86,19 @@ private:
         /// Bytes left to split.
         uint64_t length = 0;
         /// Byte rotation applied to this side's beats (read or write shift).
-        uint8_t shift = 0;
+        uint16_t shift = 0;
+        /// Bursts of this side limited to 2^max_llen bus words.
+        bool reduce_len = false;
+        int max_llen = 0;
     };
+
+    /// Bytes from the side's address to the boundary its bursts may not cross.
+    uint64_t bytes_to_boundary(const Side &side, uint32_t manager_bytes, bool not_bursting);
 
     /// Try to take the next 1D request from the mid-end.
     bool take_request(int64_t now);
+    /// Adapt the sides of a request with a compute operation.
+    void setup_compute(Idma1dReq *req);
     /// Build the split of one side.
     IdmaSplit make_split(const Side &side, uint32_t num_bytes);
 

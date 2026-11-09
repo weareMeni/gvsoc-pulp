@@ -18,9 +18,10 @@
 
 This module provides the :class:`RegDmaV3` generator: the v3 register
 front-end (one port, one stream) in front of the ND mid-end and a back-end
-with one AXI read and one AXI write manager. It is the AXI-to-AXI shape of
-the iDMA (Cheshire, voscap, the Spatz cluster DMA once driven by the xdma
-front-end) and the vehicle of the standalone tests.
+with one read and one write manager, each AXI or OBI. AXI on both sides is
+the shape of Cheshire, voscap and the Spatz cluster DMA once driven by the
+xdma front-end; AXI on one side and OBI on the other the iDMA channels of
+MAGIA (one per direction between the L2 and the tile memory).
 """
 
 from typing_extensions import override
@@ -28,12 +29,14 @@ import gvsoc.systree
 from gvsoc.gui import Signal, DisplayPulse, DisplayLogicBox
 from gvsoc.signature import IoV2Beat, IoV2SingleReq
 from ips.pulp.idma_v3.reg_dma_config import RegDmaV3Config
+from ips.pulp.idma_v3.protocol_config import PROTOCOL_AXI, PROTOCOL_OBI
 
 IDMA_V3_SOURCES = [
     'ips/pulp/idma_v3/me/idma_me_nd.cpp',
     'ips/pulp/idma_v3/be/idma_buffer.cpp',
     'ips/pulp/idma_v3/be/idma_legalizer.cpp',
     'ips/pulp/idma_v3/be/idma_be.cpp',
+    'ips/pulp/idma_v3/be/idma_compute.cpp',
     'ips/pulp/idma_v3/be/idma_axi_read.cpp',
     'ips/pulp/idma_v3/be/idma_axi_write.cpp',
 ]
@@ -41,6 +44,24 @@ IDMA_V3_SOURCES = [
 
 class RegDmaV3(gvsoc.systree.Component):
     """Single-stream register-driven iDMA (v3).
+
+    Back-ends
+    ---------
+
+    ``read.protocol`` / ``write.protocol`` (0 AXI, 1 OBI) pick the upstream
+    back-end and so the masters the component has:
+
+    ==============  ===========  ===========================================
+    read / write    RTL          Masters
+    ==============  ===========  ===========================================
+    AXI / AXI       rw_axi       ``o_AXI_READ``, ``o_AXI_WRITE``
+    AXI / OBI       r_axi_w_obi  ``o_AXI_READ``, ``o_OBI_WRITE(i)``
+    OBI / AXI       r_obi_w_axi  ``o_OBI_READ(i)``, ``o_AXI_WRITE``
+    OBI / OBI       rw_obi       ``o_OBI_READ(i)``, ``o_OBI_WRITE(i)``
+    ==============  ===========  ===========================================
+
+    The protocols written in CONF must be the configured ones, another one is
+    fatal (the RTL would hang).
 
     Register map (32-bit accesses)
     ------------------------------
@@ -52,14 +73,18 @@ class RegDmaV3(gvsoc.systree.Component):
                             source protocol, 17:15 destination protocol
                             (AXI 0), bit 0 decouple_rw, bit 1 decouple_aw
     0x004   STATUS          bits 7:0 back-end busy, bit 8 mid-end busy
-    0x008   NEXT_ID         read: launch, returns the id
-    0x00C   DONE_ID         completion counter
+    0x044   NEXT_ID         read: launch, returns the id
+    0x084   DONE_ID         completion counter
     0x0D0   DST_ADDR        destination address
     0x0D8   SRC_ADDR        source address
     0x0E0   LENGTH          bytes of one 1D transfer
     0x0E8   DST_STRIDE_2    0x0F0 SRC_STRIDE_2, 0x0F8 REPS_2
     0x100   DST_STRIDE_3    0x108 SRC_STRIDE_3, 0x110 REPS_3
     ======  ==============  ==============================================
+
+    The NEXT_ID / DONE_ID offsets are those of the default ``max_num_streams``
+    of 16: they are at 0x004 + 4 N and 0x004 + 8 N, N being
+    ``max_num_streams``; the entries of the other streams read as 0.
 
     Identifiers start at 2 and DONE_ID counts completions the same way, so a
     transfer with id ``i`` is done once ``(int32) (DONE_ID - i) >= 0``. A
@@ -71,7 +96,9 @@ class RegDmaV3(gvsoc.systree.Component):
 
     ``i_INPUT()``: register slave (IoV2SingleReq, the launch may be denied).
     ``o_AXI_READ`` / ``o_AXI_WRITE``: the AXI masters (IoV2Beat), to bind on
-    two distinct interconnect inputs. ``o_IRQ()``: completion pulse.
+    two distinct interconnect inputs. ``o_OBI_READ(i)`` / ``o_OBI_WRITE(i)``:
+    the OBI ports of each side, data_width / obi.port_width of them
+    (IoV2SingleReq). ``o_IRQ()``: completion pulse.
     ``o_BUSY()``: high while a transfer is queued or in flight.
     """
 
@@ -79,7 +106,7 @@ class RegDmaV3(gvsoc.systree.Component):
         'title': 'iDMA (v3)',
         'static_page': '../ips/pulp/idma_v3',
         'tests_dirs': [
-            {'dir':       'gvsoc/pulp/tests/idma_v3_axi',
+            {'dir':       'tests/functional/models/idma_v3_axi',
              'component': 'ips.pulp.idma_v3.reg_dma'},
         ],
     }
@@ -87,8 +114,14 @@ class RegDmaV3(gvsoc.systree.Component):
     def __init__(self, parent: gvsoc.systree.Component, name: str, config: RegDmaV3Config):
         super().__init__(parent, name, config=config)
 
-        self.add_sources(['ips/pulp/idma_v3/reg_dma.cpp', 'ips/pulp/idma_v3/fe/idma_fe_reg.cpp']
-            + IDMA_V3_SOURCES)
+        self.add_sources([
+            'ips/pulp/idma_v3/reg_dma.cpp',
+            'ips/pulp/idma_v3/fe/idma_fe_reg.cpp',
+            'ips/pulp/idma_v3/be/idma_obi_port_group.cpp',
+            'ips/pulp/idma_v3/be/idma_obi_read.cpp',
+            'ips/pulp/idma_v3/be/idma_obi_write.cpp',
+            'ips/pulp/idma_v3/be/idma_manager_factory.cpp',
+        ] + IDMA_V3_SOURCES)
 
         self.cfg = config
 
@@ -97,12 +130,24 @@ class RegDmaV3(gvsoc.systree.Component):
         return gvsoc.systree.SlaveItf(self, 'input_0', signature=IoV2SingleReq())
 
     def o_AXI_READ(self, itf: gvsoc.systree.SlaveItf):
-        """Binds the AXI read master."""
-        self.itf_bind('axi_read', itf, signature=IoV2Beat(self.cfg.axi_width))
+        """Binds the AXI read master (read.protocol AXI)."""
+        assert self.cfg.read.protocol == PROTOCOL_AXI, 'The reads are not on AXI'
+        self.itf_bind('axi_read', itf, signature=IoV2Beat(self.cfg.data_width))
 
     def o_AXI_WRITE(self, itf: gvsoc.systree.SlaveItf):
-        """Binds the AXI write master."""
-        self.itf_bind('axi_write', itf, signature=IoV2Beat(self.cfg.axi_width))
+        """Binds the AXI write master (write.protocol AXI)."""
+        assert self.cfg.write.protocol == PROTOCOL_AXI, 'The writes are not on AXI'
+        self.itf_bind('axi_write', itf, signature=IoV2Beat(self.cfg.data_width))
+
+    def o_OBI_READ(self, port: int, itf: gvsoc.systree.SlaveItf):
+        """Binds one of the OBI read ports (read.protocol OBI)."""
+        assert self.cfg.read.protocol == PROTOCOL_OBI, 'The reads are not on OBI'
+        self.itf_bind(f'obi_read_{port}', itf, signature=IoV2SingleReq())
+
+    def o_OBI_WRITE(self, port: int, itf: gvsoc.systree.SlaveItf):
+        """Binds one of the OBI write ports (write.protocol OBI)."""
+        assert self.cfg.write.protocol == PROTOCOL_OBI, 'The writes are not on OBI'
+        self.itf_bind(f'obi_write_{port}', itf, signature=IoV2SingleReq())
 
     def o_IRQ(self, itf: gvsoc.systree.SlaveItf):
         """Binds the completion pulse (one per completed transfer)."""

@@ -17,6 +17,7 @@
 """Configuration dataclass for :class:`ips.pulp.idma_v3.cluster_dma.ClusterDmaV3`."""
 
 from config_tree import Config, cfg_field
+from ips.pulp.idma_v3.protocol_config import IdmaAxiConfig, IdmaObiConfig
 
 
 class ClusterDmaV3Config(Config):
@@ -26,9 +27,9 @@ class ClusterDmaV3Config(Config):
     64-bit AXI, 32-bit TCDM ports and the RTL parameters of its two back-ends.
     """
 
-    axi_width: int = cfg_field(default=8, desc=(
-        "Width of the data path and of the AXI masters in bytes (the RTL "
-        "DataWidth / 8)."
+    data_width: int = cfg_field(default=8, desc=(
+        "Width of the data path in bytes, a power of two (the RTL DataWidth "
+        "/ 8): the AXI beat and the TCDM access."
     ))
 
     num_ax_in_flight: int = cfg_field(default=8, desc=(
@@ -46,11 +47,17 @@ class ClusterDmaV3Config(Config):
         "MetaFifoDepth); 0 derives it as buffer_depth + num_ax_in_flight."
     ))
 
-    burst_len: int = cfg_field(default=5, desc=(
-        "log2 of the AXI burst length in bus words: a burst never crosses a "
-        "2^(log2(axi_width) + burst_len) byte boundary (the RTL Burst_len, "
-        "256 B with the defaults)."
+    aw_fifo_depth: int = cfg_field(default=2, desc=(
+        "Write splits the back-end of the AXI -> TCDM stream queues ahead of "
+        "the TCDM write manager (the RTL aw_fifo_depth of "
+        "idma_backend_r_axi_rw_init_rw_obi, 2 before iDMA 5fdba1b). The TCDM "
+        "only takes a split when its word is written, so with 2 every line "
+        "of a multi-word ND transfer into the L1 waits for the previous "
+        "line's data and pays the read latency again."
     ))
+
+    axi: IdmaAxiConfig = cfg_field(default_factory=lambda: IdmaAxiConfig(burst_len=5),
+        desc="Parameters of the AXI managers (256 B bursts at 64 bits).")
 
     req_fifo_depth: int = cfg_field(default=8, desc=(
         "Transfers each stream's request FIFO can hold."
@@ -60,20 +67,10 @@ class ClusterDmaV3Config(Config):
         "Dimensions the mid-end iterates (1 to 3)."
     ))
 
-    obi_port_width: int = cfg_field(default=4, desc=(
-        "Width of one TCDM port in bytes."
-    ))
-
-    obi_ports_per_access: int = cfg_field(default=2, desc=(
-        "TCDM ports driven together for one OBI access (the RTL "
-        "mem_to_banks): access width = obi_port_width * obi_ports_per_access, "
-        "which must equal axi_width."
-    ))
-
-    obi_addr_width: int = cfg_field(default=17, desc=(
-        "Address bits kept on the TCDM ports: the cluster-absolute address "
-        "is masked to the crossbar's local space (0 keeps it whole)."
-    ))
+    obi: IdmaObiConfig = cfg_field(
+        default_factory=lambda: IdmaObiConfig(port_width=4, addr_width=17), desc=(
+        "Parameters of the TCDM (OBI) managers: 32-bit ports, the "
+        "cluster-absolute address masked to the crossbar's local space."))
 
     nb_reg_ports: int = cfg_field(default=2, desc=(
         "Register access ports, each with its own copy of the transfer "
@@ -87,4 +84,11 @@ class ClusterDmaV3Config(Config):
     launch_bubble: int = cfg_field(default=1, desc=(
         "Cycles a launch from idle spends waking the datapath (the RTL "
         "datapath clock gate); 0 disables it."
+    ))
+
+    max_num_streams: int = cfg_field(default=16, desc=(
+        "Length N of the STATUS / NEXT_ID / DONE_ID register arrays, which puts "
+        "NEXT_ID_s at 0x004 + 4 (N + s) and DONE_ID_s at 0x004 + 4 (2N + s): "
+        "16 in the upstream iDMA register file whatever the number of "
+        "streams, at most 17. The entries of missing streams read as 0."
     ))

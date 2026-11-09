@@ -25,8 +25,10 @@
 #include <vector>
 #include <vp/vp.hpp>
 #include <vp/itf/io_v2.hpp>
+#include <vp/signal.hpp>
 #include "idma_manager.hpp"
 #include "idma_be.hpp"
+#include <ips/pulp/idma_v3/protocol_config/idma_axi_config.hpp>
 
 /**
  * @brief AXI write manager (idma_axi_write + its AW channel, optionally the
@@ -53,14 +55,15 @@ public:
     ///                         it under @p itf_name.
     /// @param itf_name         Port and block name (axi_write).
     /// @param be               Back-end the data beats are popped from.
-    /// @param width            Data path width in bytes (the beat size).
-    /// @param burst_len        log2 of the burst length in bus words.
-    /// @param num_ax_in_flight Depth of the coupler's AW store.
-    /// @param meta_fifo_depth  Bursts alive from AW to B (contexts kept); 0
-    ///                         derives it from num_ax_in_flight.
-    /// @param raw_coupling     Insert the read/write channel coupler.
-    IdmaAxiWrite(vp::Component *top, std::string itf_name, IdmaBackend *be, int width,
-        int burst_len, int num_ax_in_flight, int meta_fifo_depth, bool raw_coupling);
+    /// @param params           Back-end parameters: the data path width (the
+    ///                         beat size), num_ax_in_flight (depth of the
+    ///                         coupler's AW store), meta_fifo_depth (bursts
+    ///                         alive from AW to B, 0 derives it from
+    ///                         num_ax_in_flight) and raw_coupling (insert the
+    ///                         read/write channel coupler).
+    /// @param cfg              AXI parameters (burst length).
+    IdmaAxiWrite(vp::Component *top, std::string itf_name, IdmaBackend *be,
+        const IdmaBackendParams &params, const IdmaAxiConfig &cfg);
 
     /// Hardware reset: frees every burst context and held beat.
     void reset(bool active) override;
@@ -75,6 +78,17 @@ public:
     void on_read_first_beat() override;
     bool busy() override;
 
+    /// The bus master, for a component binding it to one of its own blocks.
+    vp::IoMaster &master() { return this->bus; }
+
+    /// Handshakes since reset, for performance counters: AW (the first beat
+    /// of a burst), bytes of the accepted bursts, W beats and their bytes, B.
+    uint64_t perf_aw_done = 0;
+    uint64_t perf_aw_bytes = 0;
+    uint64_t perf_w_done = 0;
+    uint64_t perf_w_bytes = 0;
+    uint64_t perf_b_done = 0;
+
 private:
     /// One write burst, alive from its AW to its response.
     struct WriteCtx
@@ -82,6 +96,9 @@ private:
         /// Staged data of the burst, one bus word per beat; the data beats
         /// point into it, so it lives until the burst is acknowledged.
         std::vector<uint8_t> stage;
+        /// Byte strobe of the staged data, for the beats a compute operation
+        /// masks (transpose edge tiles).
+        std::vector<uint8_t> strb;
         /// Index in the pool, reported as burst_id.
         int slot = 0;
         bool in_use = false;
@@ -131,4 +148,17 @@ private:
     /// Data beat refused by the bus, re-sent on retry, and its burst.
     vp::IoReq *held_beat = nullptr;
     WriteCtx *held_ctx = nullptr;
+
+    // GUI signals, high-Z when nothing happens. w_addr / w_size pulse on every
+    // data beat the bus takes (w_last on the last one of a burst), w_wait is
+    // up while the bus refuses a beat; b pulses with the slot of a burst when
+    // it is acknowledged; burst[slot] holds the address of an outstanding
+    // burst from the legalizer's split to its acknowledgement.
+    vp::Signal<uint32_t> sig_w_addr;
+    vp::Signal<uint32_t> sig_w_size;
+    vp::Signal<bool> sig_w_last;
+    vp::Signal<bool> sig_w_wait;
+    bool w_waiting = false;
+    vp::Signal<uint32_t> sig_b;
+    std::vector<vp::Signal<uint32_t>> sig_burst;
 };

@@ -84,6 +84,33 @@ enum IdmaProtocol
     IDMA_PROT_INIT = 4,
 };
 
+/// On-the-fly compute operations (idma_pkg::compute_op_e), selected by DMOPC.
+enum IdmaComputeOp
+{
+    IDMA_COMPUTE_NONE = 0,
+    IDMA_COMPUTE_TRANSPOSE,
+    IDMA_COMPUTE_MXQUANT,
+    IDMA_COMPUTE_MXQUANT_FP16,
+    IDMA_COMPUTE_MXDEQUANT,
+    IDMA_COMPUTE_MXDEQUANT_FP16,
+};
+
+/// The compute configuration of a transfer (idma_pkg::compute_options_t).
+struct IdmaComputeCfg
+{
+    IdmaComputeOp op = IDMA_COMPUTE_NONE;
+    /// Transpose: element size 1 << mode bytes and tensor shape in elements.
+    int mode = 0;
+    int tensor_m = 0;
+    int tensor_n = 0;
+
+    bool operator==(const IdmaComputeCfg &o) const
+    {
+        return op == o.op && mode == o.mode && tensor_m == o.tensor_m && tensor_n == o.tensor_n;
+    }
+    bool operator!=(const IdmaComputeCfg &o) const { return !(*this == o); }
+};
+
 /// One launched ND transfer as produced by a front-end (the nd_req_t of the
 /// RTL midend, plus the bookkeeping the model needs to free it).
 struct IdmaNdReq
@@ -102,6 +129,14 @@ struct IdmaNdReq
     /// idma_pkg::options_t bits the legalizer honours.
     bool decouple_rw = false;
     bool decouple_aw = false;
+    /// Burst length limits (idma_pkg::options_t beo): with reduce_len, the
+    /// bursts of that side are at most 2^max_llen bus words.
+    bool src_reduce_len = false;
+    bool dst_reduce_len = false;
+    int src_max_llen = 0;
+    int dst_max_llen = 0;
+    /// On-the-fly compute applied to the data (DMOPC).
+    IdmaComputeCfg compute;
     /// Transfer id returned to software and stream the request was launched on.
     uint32_t id = 0;
     int stream = 0;
@@ -119,6 +154,13 @@ struct Idma1dReq
     int dst_prot = IDMA_PROT_AXI;
     bool decouple_rw = false;
     bool decouple_aw = false;
+    /// Burst length limits, as in IdmaNdReq.
+    bool src_reduce_len = false;
+    bool dst_reduce_len = false;
+    int src_max_llen = 0;
+    int dst_max_llen = 0;
+    /// On-the-fly compute applied to the data (DMOPC).
+    IdmaComputeCfg compute;
     /// opt.last: this is the last 1D of its ND transfer.
     bool super_last = true;
     IdmaNdReq *parent = nullptr;
@@ -131,7 +173,7 @@ struct Idma1dReq
 /// addresses [base + k * width, base + (k + 1) * width) where base is addr
 /// rounded down to the width. Only the bytes of the split are valid in the
 /// first beat (from offset) and in the last one (up to tailer), which is
-/// what IdmaBackend::beat_mask() computes.
+/// what IdmaBackend::beat_bytes() computes.
 struct IdmaSplit
 {
     /// Unaligned first byte address of the split.
@@ -139,11 +181,11 @@ struct IdmaSplit
     /// Bytes of the split.
     uint32_t num_bytes = 0;
     /// Leading invalid bytes of the first beat (addr & (w - 1)).
-    uint8_t offset = 0;
+    uint16_t offset = 0;
     /// (num_bytes + offset) & (w - 1); 0 means the last beat is full.
-    uint8_t tailer = 0;
+    uint16_t tailer = 0;
     /// read_shift or write_shift of the transfer (byte rotation).
-    uint8_t shift = 0;
+    uint16_t shift = 0;
     /// Beats of the split (AXI: AxLEN + 1).
     uint16_t num_beats = 1;
     /// Single-beat split.
@@ -166,6 +208,14 @@ struct IdmaBackendParams
     int buffer_depth = 3;
     /// Depth of the w_last FIFO (writes awaiting their B).
     int meta_fifo_depth = 11;
+    /// Read/write channel coupler (RAWCouplingAvail, AXI writes only).
+    bool raw_coupling = false;
+    /// On-the-fly compute engine elaborated (DMAEnableCompute); without it
+    /// a DMOPC operation is a plain copy.
+    bool enable_compute = false;
+    /// Two transpose tile banks (ComputeTuning.transpose_full_duplex): a tile
+    /// fills while the previous one drains; with one, at half rate.
+    bool transpose_full_duplex = true;
 };
 
 /**

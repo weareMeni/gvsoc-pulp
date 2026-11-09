@@ -71,6 +71,22 @@ IdmaSplit IdmaLegalizer::make_split(const Side &side, uint32_t num_bytes)
 
 
 
+// The RTL page splitter of a side reducing its burst length: 2^(offset +
+// max_llen) bytes instead of the protocol page, capped at the 4 KiB AXI page.
+uint64_t IdmaLegalizer::bytes_to_boundary(const Side &side, uint32_t manager_bytes,
+    bool not_bursting)
+{
+    if (!side.reduce_len || not_bursting)
+    {
+        return manager_bytes;
+    }
+    int bits = std::min(this->log2_width + side.max_llen, 12);
+    uint64_t page = (uint64_t)1 << bits;
+    return std::min<uint64_t>(manager_bytes, page - (side.addr & (page - 1)));
+}
+
+
+
 bool IdmaLegalizer::take_request(int64_t now)
 {
     // The mid-end hands over at most one 1D request per cycle
@@ -79,8 +95,8 @@ bool IdmaLegalizer::take_request(int64_t now)
         return false;
     }
 
-    // The write side of the previous requests may still hold two splits, no
-    // more: on a protocol without an address channel the hardware only takes a
+    // The write side of the previous requests may still hold as many splits as
+    // its address FIFO, no more (2 on the RTL before iDMA 5fdba1b): on a protocol without an address channel the hardware only takes a
     // split when the word is written, so a request with several words is not
     // finished until its data is there. This is what costs one read latency
     // per line of an ND transfer into the TCDM. Measured on the RTL: an ND
@@ -88,7 +104,7 @@ bool IdmaLegalizer::take_request(int64_t now)
     // addresses in a row, the next three once the first is written), and one
     // of 64-byte lines issues the next line's read before the previous line's
     // last beat.
-    if (this->wm != nullptr && this->wm->aw_unissued() > 2)
+    if (this->wm != nullptr && this->wm->aw_unissued() > this->wm->aw_depth())
     {
         return false;
     }
@@ -131,6 +147,8 @@ bool IdmaLegalizer::take_request(int64_t now)
     this->r.addr = req->src;
     this->r.length = req->length;
     this->r.shift = req->src & (this->width - 1);
+    this->r.reduce_len = req->src_reduce_len;
+    this->r.max_llen = req->src_max_llen;
 
     // read_shift = src % width and write_shift = -(dst % width): with these
     // the byte at transfer offset n always sits in lane (n % width) of the
@@ -139,11 +157,24 @@ bool IdmaLegalizer::take_request(int64_t now)
     this->w.addr = req->dst;
     this->w.length = req->length;
     this->w.shift = (this->width - (req->dst & (this->width - 1))) & (this->width - 1);
+    this->w.reduce_len = req->dst_reduce_len;
+    this->w.max_llen = req->dst_max_llen;
 
     // The read and write machines run in lock-step unless software decoupled
     // them or one side does not burst (OBI / INIT), in which case the RTL
     // lets each side advance on its own.
     this->coupled = !req->decouple_rw && !rm->not_bursting() && !wm->not_bursting();
+
+    if (!this->be->params.enable_compute)
+    {
+        // No compute engine: DMOPC operations are plain copies
+        req->compute = IdmaComputeCfg();
+    }
+    if (req->compute.op != IDMA_COMPUTE_NONE)
+    {
+        this->setup_compute(req);
+    }
+    this->be->compute_track(req);
 
     this->be->trace.msg(vp::Trace::LEVEL_DEBUG,
         "Taking request (src: 0x%lx, dst: 0x%lx, length: 0x%lx, src_prot: %d, dst_prot: %d, "
@@ -151,6 +182,44 @@ bool IdmaLegalizer::take_request(int64_t now)
         req->dst_prot, this->coupled, req->super_last);
 
     return true;
+}
+
+
+
+// A compute transfer decouples both sides, the write side's length follows
+// the operation's byte ratio (MX: 128 or 64 bytes per 33-byte block), and
+// both addresses must be beat-aligned (the engine takes and gives whole
+// beats)
+void IdmaLegalizer::setup_compute(Idma1dReq *req)
+{
+    uint64_t in_bytes = 0, out_bytes = 0;
+    switch (req->compute.op)
+    {
+        case IDMA_COMPUTE_MXQUANT: in_bytes = 128; out_bytes = 33; break;
+        case IDMA_COMPUTE_MXQUANT_FP16: in_bytes = 64; out_bytes = 33; break;
+        case IDMA_COMPUTE_MXDEQUANT: in_bytes = 33; out_bytes = 128; break;
+        case IDMA_COMPUTE_MXDEQUANT_FP16: in_bytes = 33; out_bytes = 64; break;
+        default: break;
+    }
+    if (in_bytes != 0)
+    {
+        if (req->length % in_bytes != 0)
+        {
+            this->be->trace.fatal("Compute transfer length 0x%lx not a multiple of %lu bytes\n",
+                req->length, in_bytes);
+        }
+        this->w.length = req->length / in_bytes * out_bytes;
+    }
+
+    if ((req->src | req->dst) & (this->width - 1))
+    {
+        this->be->trace.fatal("Compute transfer not beat-aligned (src: 0x%lx, dst: 0x%lx)\n",
+            req->src, req->dst);
+    }
+
+    this->coupled = false;
+    req->decouple_rw = true;
+    req->decouple_aw = true;
 }
 
 
@@ -186,16 +255,19 @@ bool IdmaLegalizer::step(int64_t now)
 
     // Each side may go up to the next boundary its protocol imposes (the RTL
     // page splitter: 2^(offset + burst_len) for AXI, one word when not
-    // bursting), and no further than the end of the transfer
+    // bursting, 2^(offset + max_llen) when the transfer reduces the burst
+    // length), and no further than the end of the transfer
     uint64_t r_bytes = 0;
     uint64_t w_bytes = 0;
     if (this->r.valid)
     {
-        r_bytes = std::min<uint64_t>(this->r.length, this->rm->bytes_to_page_boundary(this->r.addr));
+        r_bytes = std::min<uint64_t>(this->r.length, this->bytes_to_boundary(this->r,
+            this->rm->bytes_to_page_boundary(this->r.addr), this->rm->not_bursting()));
     }
     if (this->w.valid)
     {
-        w_bytes = std::min<uint64_t>(this->w.length, this->wm->bytes_to_page_boundary(this->w.addr));
+        w_bytes = std::min<uint64_t>(this->w.length, this->bytes_to_boundary(this->w,
+            this->wm->bytes_to_page_boundary(this->w.addr), this->wm->not_bursting()));
     }
 
     bool r_go, w_go;
