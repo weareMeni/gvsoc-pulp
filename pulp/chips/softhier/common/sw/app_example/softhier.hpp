@@ -112,11 +112,9 @@ template<
 >
 struct config {
     static_assert(Mb > 0 && Mb % 16 == 0);
-    static_assert(Nb > 0 && Nb % 16 == 0);
     static_assert(Kb > 0);
 
     static_assert(FORMAT == Float8 || FORMAT == Float16 || FORMAT == Float8Alt || FORMAT == Float16Alt);
-
     static_assert(LoadDepth >= 2, "Ring rotation requires two input slots");
 
     using data_type = std::conditional_t< FORMAT == Float8 || FORMAT == Float8Alt, uint8_t, uint16_t>;
@@ -141,7 +139,17 @@ struct config {
     static_assert(TCDM_BYTES <= 1048576, "Tiles must fit in TCDM");
 };
 
-template<typename C>
+/*template<typename C>
 void mm_summa(typename C::data_type* A, typename C::data_type* B, typename C::data_type* C_out, size_t M, size_t N, size_t K);
 
-#include "mm_summa.tpp"
+#include "mm_summa.tpp"*/
+
+/*template<typename C>
+void mm_summa25d_c4(typename C::data_type* A, typename C::data_type* B, typename C::data_type* C_out, size_t M, size_t N, size_t K);
+
+#include "mm_summa_25D.tpp"*/
+
+template<typename C>
+void mm_gemv_threaded(typename C::data_type* A, typename C::data_type* B, typename C::data_type* C_out, size_t M, size_t N, size_t K);
+
+#include "gemv.tpp"

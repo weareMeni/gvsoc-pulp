@@ -48,7 +48,7 @@ class SoftHierArchBase:
 
     def __init__(self):
 
-        self.num_core_per_cluster    = 1
+        self.num_core_per_cluster    = 2
 
         # Family-specific fields, not appearing here, can be read by using
         # getattr(arch, 'field_name', None)

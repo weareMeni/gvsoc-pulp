@@ -1,6 +1,6 @@
 #define W_COLS_OFFSET 0
 
-template<size_t WIDTH, size_t LENGTH, typename T>
+template<size_t WIDTH, size_t LENGTH, typename T, bool row_major = true>
 struct tile {
     static constexpr size_t BANK_WIDTH = 4;
     static constexpr size_t BANK_COUNT = 128;
@@ -9,9 +9,25 @@ struct tile {
     static constexpr size_t length = LENGTH;
     static constexpr size_t num_elements = LENGTH * WIDTH;
 
-    alignas(BANK_WIDTH) T data[LENGTH][WIDTH];
+    alignas(BANK_WIDTH) T data
+        [row_major ? LENGTH : WIDTH]
+        [row_major ? WIDTH : LENGTH];
 
-    T* ptr() {return &data[0][0];}
+    T* ptr() { return &data[0][0]; }
+    const T* ptr() const { return &data[0][0]; }
+
+    static constexpr size_t offset(size_t row, size_t col) {
+        return row_major ? row * WIDTH + col
+                         : col * LENGTH + row;
+    }
+
+    T& operator()(size_t row, size_t col) {
+        return ptr()[offset(row, col)];
+    }
+
+    const T& operator()(size_t row, size_t col) const {
+        return ptr()[offset(row, col)];
+    }
 };
 
 struct Semaphore {
@@ -131,7 +147,7 @@ inline int ClusterPipeline<C>::submit_redmule(
         reinterpret_cast<uintptr_t>(A_tiles[in_slot].ptr()),
         reinterpret_cast<uintptr_t>(B_tiles[in_slot].ptr()),
         reinterpret_cast<uintptr_t>(C_tiles[out_slot].ptr()),
-        C::N, C::M, C::K,
+        C::M, C::K, C::N,
         static_cast<uint16_t>(W_COLS_OFFSET),
         op,
         C::format

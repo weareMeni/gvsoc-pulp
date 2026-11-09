@@ -109,19 +109,25 @@ inline void bare_dma_wait_all() {
         : "t0");
 }
 
-inline void bare_dma_wait(uint32_t txid) {
+inline bool bare_dma_done(uint32_t txid) {
     register uint32_t completed asm("t0");
 
-    do {
-        asm volatile(
-            ".word %1\n"
-            : "=r"(completed)
-            : "i"(R_TYPE_ENCODE(
-                DMSTATI_FUNCT7, 0, 0,
-                XDMA_FUNCT3, 5, OP_CUSTOM1
-            ))
-        );
-    } while (completed < txid);
+    asm volatile(
+        ".word %1\n"
+        : "=r"(completed)
+        : "i"(R_TYPE_ENCODE(
+            DMSTATI_FUNCT7, 0, 0,
+            XDMA_FUNCT3, 5, OP_CUSTOM1
+        ))
+    );
+
+    return completed >= txid;
+}
+
+inline void bare_dma_wait(uint32_t txid) {
+    while (!bare_dma_done(txid)) {
+        asm volatile("" ::: "memory");
+    }
 }
 
 /*************************************

@@ -3,59 +3,99 @@
 #include <iostream>
 #include <string>
 
+#include <type_traits>
+#include <cstdint>
+#include <cstdio>
+
 #include "softhier.hpp"
 #include "benchmark_layout.hpp"
 
 template<typename T>
-inline void correctness_check(size_t N, size_t M, size_t K, T* A, T* B, T* C_out){
-    size_t errors = 0;
-    double max_error = 0.0;
+inline void correctness_check(
+    size_t N, size_t M, size_t K,
+    const T* A, const T* B, const T* C,
+    bool a_row_major = true, bool b_row_major = true
+) {
+    constexpr float ATOL = 0.01f, RTOL = 0.01f;
+    constexpr size_t BLOCK = 1024;
+    static float acc[BLOCK];  // Ordinary .bss, not .l1
 
-    constexpr double ATOL = 1e-3;
-    constexpr double RTOL = 1e-3;
-
-    for (size_t i = 0; i < M; ++i) {
-        for (size_t j = 0; j < N; ++j) {
-            double expected = 0.0;
-
-            for (size_t k = 0; k < K; ++k) {
-                expected += static_cast<double>(A[i * K + k]) * static_cast<double>(B[k * N + j]);
-            }
-
-            const double actual = static_cast<double>(C_out[i * N + j]);
-            const double diff = __builtin_fabs(actual - expected);
-            const double tolerance = ATOL + RTOL * __builtin_fabs(expected);
-
-            if (diff > max_error)
-                max_error = diff;
-
-            if (!(diff <= tolerance)) {
-                if (errors < 10) {
-                    flex_print("Mismatch: expected=");
-                    flex_print_int(expected);
-                    flex_print(" actual=");
-                    flex_print_int(actual);
-                    flex_print("\n");
-                }
-                ++errors;
-            }
+    auto f32 = [](T v) -> float {
+        if constexpr (std::is_same_v<T, uint16_t>) {
+            _Float16 h;
+            __builtin_memcpy(&h, &v, sizeof(h));
+            return (float)h;
         }
+        return (float)v;
+    };
+
+    size_t errors = 0;
+
+    auto check = [&](size_t i, size_t j, float ref) {
+        float got = f32(C[i*N + j]);
+        float diff = __builtin_fabsf(got - ref);
+        float tol = ATOL + RTOL * __builtin_fabsf(ref);
+
+        if (!(diff <= tol)) {
+            if (errors < 10)
+                printf("Mismatch (%u,%u): actual=%d expected=%d "
+                       "error=%d tolerance=%d (all x10000)\n",
+                       (unsigned)i, (unsigned)j,
+                       (int)(got * 10000.0f),
+                       (int)(ref * 10000.0f),
+                       (int)(diff * 10000.0f),
+                       (int)(tol * 10000.0f));
+            ++errors;
+        }
+    };
+
+    printf("CHECK START M=%u N=%u K=%u\n",
+           (unsigned)M, (unsigned)N, (unsigned)K);
+
+    if (a_row_major) {
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j) {
+                float sum = 0;
+                for (size_t k = 0; k < K; ++k)
+                    sum += f32(A[i*K+k]) *
+                           f32(B[b_row_major ? k*N+j : j*K+k]);
+                check(i, j, sum);
+            }
+    } else {
+        for (size_t j = 0; j < N; ++j)
+            for (size_t base = 0; base < M; base += BLOCK) {
+                size_t rows = (M-base < BLOCK) ? M-base : BLOCK;
+
+                for (size_t r = 0; r < rows; ++r) acc[r] = 0;
+
+                for (size_t k = 0; k < K; ++k) {
+                    float b = f32(B[b_row_major ? k*N+j : j*K+k]);
+                    const T* a = A + k*M + base;
+
+                    for (size_t r = 0; r < rows; ++r)
+                        acc[r] += f32(a[r]) * b;
+
+                    if ((k+1) % 128 == 0)
+                        printf("CHECK K %u/%u\n",
+                               (unsigned)(k+1), (unsigned)K);
+                }
+
+                for (size_t r = 0; r < rows; ++r)
+                    check(base+r, j, acc[r]);
+            }
     }
 
-    flex_print("GEMM verification: ");
-    flex_print_int(errors);
-    flex_print(" errors, max error=");
-    flex_print_int(max_error);
-    flex_print("\n");
+    printf("Verification: %u errors\n", (unsigned)errors);
 }
 
 template<typename C, typename Func>
-void benchmark(size_t N, size_t M, size_t K, Func F, const char* name){
+void benchmark(size_t N, size_t M, size_t K, Func F, const char* name, bool a_row_major = true){
     hwpe_cg_enable();
 
     using T = typename C::data_type;
 
     const uint32_t cid = flex_get_cluster_id();
+    const uint32_t core = flex_get_core_id();
     const bool master = (cid == 0 && flex_is_first_core());
     size_t hbm_offset = 0;
 
@@ -103,7 +143,8 @@ void benchmark(size_t N, size_t M, size_t K, Func F, const char* name){
         flex_print("\n");
     }
 
-    hwpe_soft_clear();
+    if (core == 1)
+        hwpe_soft_clear();
 
     flex_global_barrier_polling();
 
@@ -116,12 +157,16 @@ void benchmark(size_t N, size_t M, size_t K, Func F, const char* name){
     // Stop Timer
     flex_timer_end();
 
+    mm_gemv_threaded_dump_trace<C>();
+
     flex_global_barrier_polling();
 
     if (master){
         flex_print("Running Correctness Test\n");
-        correctness_check(N, M, K, A, B, C_out);
+        correctness_check(N, M, K, A, B, C_out, a_row_major);
     }
+
+    flex_global_barrier_polling();
 
     hwpe_cg_disable();
 }
@@ -131,9 +176,9 @@ int main()
     flex_global_barrier_init();
     redmule_irq_init();
     
-    using C = config<256, 256, 128, 3, 4, 4, true, Float16>;
+    using C = config<256, 1, 512, 3, 4, 4, true, Float16>;
 
-    benchmark<C>(1024, 1024, 512, mm_summa<C>, "mm_singledev");
+    benchmark<C>(1, 1024, 1024, mm_gemv_threaded<C>, "mm_gemv_threaded", false);
 
     flex_eoc_all(0);
     

@@ -50,7 +50,7 @@ ifdef app
 	sw_cmake_arg = "-DSRC_DIR=$(app_path)"
 endif
 
-arch_cmake_arg := "-DRISCV_ARCH=rv32imafd_zfh"
+arch_cmake_arg := "-DRISCV_ARCH=rv32imafdv_zfh_zvfh"
 
 .PHONY: sh-data
 

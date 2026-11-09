@@ -231,7 +231,7 @@ class ClusterUnit(gvsoc.systree.Component):
                 cores[i].o_VLSU(lane, vlsu_router.i_INPUT())
                 self.bind(vlsu_router, 'output', tcdm, f'in_{arch.num_core + i * arch.spatz_num_lane + lane}')
 
-        # ITC <-> core 0
+        # RedMule <-> Core 1
         itc.o_IRQ_REQ(cores[0].i_IRQ_REQ())
         cores[0].o_IRQ_ACK(itc.i_IRQ_ACK())
 
@@ -264,7 +264,7 @@ class ClusterUnit(gvsoc.systree.Component):
         self.o_WIDE_INPUT(tcdm.i_BUS_INPUT())
 
         # binding to redmule
-        narrow_axi.o_MAP(redmule.i_INPUT(), base=arch.redmule_reg_base, size=arch.redmule_reg_size, rm_base=True)
+        narrow_axi.o_MAP(redmule.i_INPUT_V2(), base=arch.redmule_reg_base, size=arch.redmule_reg_size, rm_base=True)
         narrow_axi.o_MAP(itc.i_INPUT(), base=arch.itc_reg_base, size=arch.itc_reg_size, rm_base=True)
 
         # RedMulE completion pulse -> ITC event input
